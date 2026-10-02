@@ -201,7 +201,8 @@ check('check-09 busy 单闸：跑中再触发抛 CHECK_BUSY，结束后闸重新
   });
   const p = svc.run();
   assert.equal(svc.running, true);
-  assert.throws(() => svc.run(), (e) => e.code === 'CHECK_BUSY');
+  // 必须是 rejected promise 而不是同步 throw：定时器回调接不住同步异常，会打崩宿主。
+  await assert.rejects(() => svc.run(), (e) => e.code === 'CHECK_BUSY');
   release();
   await p;
   assert.equal(svc.running, false);
@@ -239,13 +240,16 @@ check('check-12 每轮落库后按 prefs.keepEvents 裁剪流水', async () => {
 check('check-13 定时节拍：宿主 timer 优先，缺了退 setInterval（unref），dispose 清干净', async () => {
   const stores = memStores();
   let hostCalls = 0;
-  const svc = makeCheck({ stores, getIntervalFn: () => ((fn, ms) => { hostCalls += 1; return { fn, ms, unref() {} }; }) });
+  let disposed = 0;
+  // 真宿主 ctx.timer.interval 返回 disposer 函数，不是 handle —— 停表必须调它。
+  const svc = makeCheck({ stores, getIntervalFn: () => ((fn, ms) => { hostCalls += 1; const h = { fn, ms, unref() {} }; const d = () => { disposed += 1; }; d.handle = h; return d; }) });
   svc.setCadence(360);
   assert.equal(hostCalls, 1);
   assert.equal(svc.timerBackend, 'ctx.timer');
   svc.setCadence(60); // 重挂：旧的必须停掉
   assert.equal(hostCalls, 2);
   svc.dispose();
+  assert.equal(disposed, 2, '两次重挂/dispose 都要停掉旧定时器（clearInterval 对函数句柄是 no-op → 泄漏）');
 });
 
 check('check-14 无宿主 timer 时 timerBackend 说 setInterval（能力位不许自相矛盾）', async () => {
