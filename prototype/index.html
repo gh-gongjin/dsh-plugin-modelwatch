@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>dsh-plugin-modelwatch 原型（spec 页 · v1.3 分页签版）</title>
+<style>
+/* 注意：这里**故意不写全局 `*{box-sizing:border-box}`**。全局重置会把「根容器是 content-box、
+   width:100% + 左右 padding 把外框顶宽 40px」这类真机 bug 藏住 —— 原型必须与 client.js 同选择器同口径：
+   根自己带 box-sizing:border-box，子元素靠 .mw-root *。 */
+html,body{margin:0}
+body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+
+/* ============================================================
+   spec 页 = client.js 的同构复刻（结构/类名/断点必须一一对应）
+   v1.3 结构：Header → TabBar(5) → Panel(overview/top/new/events/settings) → disclaimer
+   ⛔ 不要给 .mw-root 加 container-type：inline 轴 size containment 会让宽度不再由内容撑开，
+      宿主主区是 flex 时 .mw-root 直接算成 0 宽 ⇒ 整页塌成"每张卡一条竖线"。断点只用 @media。
+   ⛔ 根容器必须 box-sizing:border-box（宿主无通配 box-sizing，`.mw-root *` 盖不到根自己）。
+   ============================================================ */
+.mw-root{
+  --mw-fg:#1a1a1a;--mw-muted:#6b6b70;--mw-faint:#a0a0a6;
+  --mw-card:#fff;--mw-soft:#fafafb;--mw-hover:#f0f0f1;
+  --mw-line:#ebebed;--mw-line2:#e0e0e3;
+  --mw-ok:#1f883d;--mw-err:#c0392b;--mw-warn:#9a6700;--mw-info:#3d6fe0;
+  box-sizing:border-box;color:var(--mw-fg);background:transparent;
+  padding:16px 20px 28px;width:100%;max-width:1320px;margin:0 auto;
+  max-height:100vh;overflow-y:auto;
+  display:flex;flex-direction:column;gap:12px;
+  font-size:13px;line-height:1.5;
+}
+.mw-root *{box-sizing:border-box}
+.mw-num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.mw-r{text-align:right}
+.mw-sub{color:var(--mw-muted);font-size:12px}
+
+/* ---------- 页头（左：标题+口径 / 右：状态 pill + 检查时刻 + 唯一主操作） ---------- */
+.mw-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;min-width:0}
+.mw-head-l{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+.mw-head-r{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mw-title{font-size:16px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
+.mw-head .mw-sub{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+  border:1px solid var(--mw-line);background:var(--mw-soft);font-size:12px;color:var(--mw-muted);white-space:nowrap}
+
+/* ---------- 页签 ---------- */
+.mw-tabs{display:flex;gap:2px;border-bottom:1px solid var(--mw-line);overflow-x:auto;margin-top:2px}
+.mw-tab{position:relative;display:inline-flex;align-items:center;gap:6px;border:none;background:transparent;
+  font-family:inherit;font-size:13px;color:var(--mw-muted);padding:8px 12px;cursor:pointer;
+  border-radius:8px 8px 0 0;white-space:nowrap}
+.mw-tab:hover{color:var(--mw-fg);background:var(--mw-soft)}
+.mw-tab.on{color:var(--mw-fg);font-weight:600}
+.mw-tab.on:after{content:'';position:absolute;left:10px;right:10px;bottom:-1px;height:2px;
+  background:var(--mw-fg);border-radius:2px}
+.mw-tab-n{font-size:11px;color:var(--mw-faint);font-variant-numeric:tabular-nums}
+.mw-tab.on .mw-tab-n{color:var(--mw-muted)}
+.mw-panel{display:flex;flex-direction:column;gap:12px;min-width:0}
+/* hidden 属性必须显式覆盖：.mw-panel 的 display:flex 优先级高于 UA 的 [hidden] */
+.mw-panel[hidden]{display:none}
+
+/* ---------- 卡片 ---------- */
+.mw-card{background:var(--mw-card);border:1px solid var(--mw-line);border-radius:12px;overflow:hidden;min-width:0}
+.mw-card-h{display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--mw-soft);border-bottom:1px solid var(--mw-line)}
+.mw-card-t{font-weight:600;font-size:13px;white-space:nowrap}
+.mw-card-n{margin-left:auto;color:var(--mw-muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mw-card-b{padding:12px 14px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.mw-note{margin:0;padding:8px 14px 10px;border-top:1px solid var(--mw-line);color:var(--mw-faint);font-size:11px}
+.mw-empty{margin:0;padding:10px 14px;color:var(--mw-muted);font-size:12px}
+.mw-link{border:none;background:transparent;color:var(--mw-info);font-family:inherit;font-size:12px;
+  cursor:pointer;padding:0;margin-left:auto;white-space:nowrap}
+.mw-link:hover{text-decoration:underline}
+/* 卡头里「计数 + 链接」要贴在一起收在右侧：两个 margin-left:auto 会把空白对半分，计数飘到中间 */
+.mw-card-h .mw-card-n+.mw-link{margin-left:2px}
+
+/* ---------- 主从两栏（align-items:start = 卡片按内容自然高度，不互相拉伸） ---------- */
+.mw-cols{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:12px;align-items:start}
+@media (max-width:1080px){.mw-cols{grid-template-columns:minmax(0,1fr)}}
+
+/* ---------- 状态点与就地告警条（零浮层） ---------- */
+.mw-dot{width:7px;height:7px;border-radius:50%;flex:0 0 7px;background:var(--mw-faint);align-self:center}
+.mw-dot-ok{background:var(--mw-ok)}
+.mw-dot-err{background:var(--mw-err)}
+.mw-notice{padding:7px 10px;border-radius:8px;border:1px solid var(--mw-line);border-left:3px solid var(--mw-warn);
+  background:var(--mw-soft);color:var(--mw-muted);font-size:12px;line-height:1.5}
+.mw-notice-err{border-left-color:var(--mw-err)}
+.mw-srcrow{display:flex;align-items:baseline;gap:9px;min-width:0}
+
+/* ---------- 表格 ---------- */
+.mw-scroll{max-height:420px;overflow-y:auto;overflow-x:hidden}
+.mw-tbl{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:12px}
+.mw-tbl th{position:sticky;top:0;z-index:1;background:var(--mw-card);text-align:left;font-weight:500;
+  color:var(--mw-muted);font-size:11px;padding:7px 8px;border-bottom:1px solid var(--mw-line);white-space:nowrap}
+.mw-tbl th:first-child,.mw-tbl td:first-child{padding-left:14px}
+.mw-tbl th:last-child,.mw-tbl td:last-child{padding-right:14px}
+.mw-tbl td{padding:6px 8px;border-bottom:1px solid var(--mw-line);vertical-align:middle;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-tbl tbody tr:last-child td{border-bottom:none}
+.mw-tbl tbody tr:hover td{background:var(--mw-hover)}
+.mw-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-slug{display:block;color:var(--mw-faint);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-up{color:var(--mw-ok)}
+.mw-down{color:var(--mw-err)}
+.mw-flat{color:var(--mw-faint)}
+
+/* ---------- 序数徽标（前三名金/银/铜，第 4 名起中性） ---------- */
+.mw-rank{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:8px;
+  font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;flex:0 0 auto}
+.mw-rank-1{background:#e8b530;color:#3d2c00}
+.mw-rank-2{background:#c3c9d2;color:#2f353c}
+.mw-rank-3{background:#cf9a63;color:#3a2410}
+.mw-rank-n{background:var(--mw-soft);color:var(--mw-faint);border:1px solid var(--mw-line)}
+
+/* ---------- 本周前三领奖台 ---------- */
+.mw-podium{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:10px}
+.mw-pod{display:flex;flex-direction:column;gap:6px;padding:12px 14px;border:1px solid var(--mw-line);
+  border-radius:12px;background:var(--mw-card);min-width:0}
+.mw-pod-1{border-color:#ecd9a8;background:linear-gradient(180deg,#fffdf4,#fff)}
+.mw-pod-2{border-color:#dbdfe5;background:linear-gradient(180deg,#fcfcfd,#fff)}
+.mw-pod-3{border-color:#e7cfb6;background:linear-gradient(180deg,#fffaf5,#fff)}
+.mw-pod-h{display:flex;align-items:center;gap:8px}
+.mw-pod-r{font-size:11px;color:var(--mw-faint);font-variant-numeric:tabular-nums}
+.mw-pod-slug{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-pod-n{font-size:20px;font-weight:600;letter-spacing:-.3px;font-variant-numeric:tabular-nums;line-height:1.2}
+.mw-pod-sub{display:flex;align-items:baseline;gap:6px;font-size:11px;color:var(--mw-faint)}
+
+/* ---------- 榜首行与量级条 ---------- */
+.mw-tr-medal td{background:#fffdf7}
+.mw-bar{height:6px;border-radius:3px;background:var(--mw-soft);overflow:hidden}
+.mw-bar i{display:block;height:100%;border-radius:3px;background:var(--mw-muted);opacity:.45}
+.mw-bar-1 i{background:#e8b530;opacity:1}
+.mw-bar-2 i{background:#b4bcc7;opacity:1}
+.mw-bar-3 i{background:#cf9a63;opacity:1}
+
+/* ---------- 卡内小结（总览下半区） ---------- */
+.mw-mini{display:flex;align-items:baseline;gap:8px;padding:7px 0;border-bottom:1px solid var(--mw-line);min-width:0}
+.mw-mini:last-child{border-bottom:none}
+.mw-mini-t{flex:0 0 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-mini-s{color:var(--mw-faint);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mw-mini-n{margin-left:auto;flex:0 0 auto;color:var(--mw-faint);font-size:11px;font-variant-numeric:tabular-nums}
+
+/* ---------- 变化记录（时间线：左圆点按 kind 着色） ---------- */
+.mw-tl{list-style:none;margin:0;padding:2px 14px;display:flex;flex-direction:column}
+.mw-tl li{display:flex;align-items:flex-start;gap:9px;padding:7px 0;border-bottom:1px solid var(--mw-line);min-width:0}
+.mw-tl li:last-child{border-bottom:none}
+.mw-tl li::before{content:'';flex:0 0 6px;width:6px;height:6px;border-radius:50%;
+  background:var(--mw-faint);align-self:center;margin-right:-2px}
+.mw-tl li[data-kind="new_model"]::before,.mw-tl li[data-kind="top_enter"]::before{background:var(--mw-info)}
+.mw-tl li[data-kind="source_error"]::before,.mw-tl li[data-kind="removed_model"]::before{background:var(--mw-err)}
+.mw-tl li[data-kind="source_recover"]::before{background:var(--mw-ok)}
+.mw-tl li[data-kind="top_move"]::before{background:var(--mw-warn)}
+.mw-chip{flex:0 0 auto;min-width:74px;text-align:center;padding:1px 8px;border-radius:999px;
+  border:1px solid var(--mw-line2);background:var(--mw-soft);color:var(--mw-muted);font-size:11px}
+.mw-tl-body{min-width:0;flex:1 1 auto;overflow-wrap:anywhere;line-height:1.45}
+.mw-tl-body .mw-sub{margin-left:6px}
+.mw-ago{flex:0 0 auto;color:var(--mw-faint);font-size:11px;white-space:nowrap;align-self:flex-start;padding-top:1px}
+
+/* ---------- 设置 ---------- */
+/* 注意：.mw-setrow 会挂在 .mw-card-b 上，必须显式写回 row —— .mw-card-b 是 column。 */
+.mw-setrow{display:flex;flex-direction:row;align-items:center;gap:10px;flex-wrap:wrap}
+.mw-setlabel{flex:0 0 auto;min-width:62px;color:var(--mw-muted);font-size:12px}
+.mw-seg{display:inline-flex;padding:2px;gap:2px;background:var(--mw-soft);border:1px solid var(--mw-line);border-radius:8px}
+.mw-seg button{border:none;background:transparent;color:var(--mw-muted);font-family:inherit;font-size:12px;
+  padding:3px 10px;border-radius:6px;cursor:pointer}
+.mw-seg button.on{background:var(--mw-fg);color:#fff;font-weight:500}
+.mw-btn{font-family:inherit;font-size:12px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--mw-line2);background:var(--mw-card);color:var(--mw-fg);padding:4px 12px}
+.mw-btn:hover:not(:disabled){background:var(--mw-hover)}
+.mw-btn:disabled{opacity:.5;cursor:default}
+.mw-btn-main{background:var(--mw-fg);border-color:var(--mw-fg);color:#fff;font-weight:500;padding:5px 14px}
+.mw-btn.mw-btn-main:hover:not(:disabled){background:var(--mw-fg);opacity:.86}
+.mw-step{width:28px;padding:4px 0;text-align:center;font-size:14px;line-height:1}
+.mw-count{min-width:34px;text-align:center;font-weight:600}
+.mw-saved{color:var(--mw-ok);font-size:12px}
+
+.mw-disclaimer{margin:2px 0 0;color:var(--mw-faint);font-size:11px;line-height:1.6}
+</style>
+</head>
+<body>
+<div class="mw-root">
+
+  <!-- ===== 页头：主操作唯一入口 ===== -->
+  <header class="mw-head">
+    <div class="mw-head-l">
+      <span class="mw-title">模型监控</span>
+      <span class="mw-sub">OpenRouter 新上模型与热门周榜 · 全程只读 GET</span>
+    </div>
+    <div class="mw-head-r">
+      <span class="mw-pill" title="热门周榜：页面结构变化：没找到 flight 数据段"><i class="mw-dot mw-dot-err"></i>榜单源故障</span>
+      <span class="mw-sub mw-num">检查于 5 分钟前 · 模型总数 462</span>
+      <button class="mw-btn mw-btn-main">立即检查</button>
+    </div>
+  </header>
+
+  <!-- ===== 页签（计数跟着数据走，不写死） ===== -->
+  <nav class="mw-tabs">
+    <button class="mw-tab on" data-tab="overview">总览</button>
+    <button class="mw-tab" data-tab="top">热门周榜<span class="mw-tab-n mw-num">15</span></button>
+    <button class="mw-tab" data-tab="new">新上模型<span class="mw-tab-n mw-num">6</span></button>
+    <button class="mw-tab" data-tab="events">变化记录<span class="mw-tab-n mw-num">6</span></button>
+    <button class="mw-tab" data-tab="settings">设置</button>
+  </nav>
+
+  <!-- ================= 总览 ================= -->
+  <div class="mw-panel" id="p-overview">
+
+    <!-- 数据源状态：主操作只在页头，这里不重复放按钮 -->
+    <section class="mw-card">
+      <div class="mw-card-h">
+        <span class="mw-card-t">数据源状态</span>
+        <span class="mw-card-n mw-num">检查于 5 分钟前 · 模型总数 462</span>
+      </div>
+      <div class="mw-card-b">
+        <div class="mw-srcrow"><i class="mw-dot mw-dot-ok"></i><b>官方清单 API</b><span class="mw-sub mw-num">在位 · 上次成功 刚刚</span></div>
+        <div class="mw-srcrow"><i class="mw-dot mw-dot-err"></i><b>热门周榜（非官方源）</b><span class="mw-sub" title="页面结构变化：没找到 flight 数据段">故障 · 页面结构变化：没找到 flight 数据段</span></div>
+      </div>
+    </section>
+
+    <!-- 本周前三 -->
+    <section class="mw-card">
+      <div class="mw-card-h">
+        <span class="mw-card-t">本周前三</span>
+        <span class="mw-card-n">非官方源</span>
+        <button class="mw-link" data-go="top">完整榜单 →</button>
+      </div>
+      <div class="mw-card-b">
+        <div class="mw-podium">
+          <div class="mw-pod mw-pod-1">
+            <div class="mw-pod-h"><span class="mw-rank mw-rank-1" title="第 1 名">1</span><span class="mw-pod-r">榜内第 1 名</span></div>
+            <div class="mw-pod-slug" title="stealth/space-bunny-alpha">stealth/space-bunny-alpha</div>
+            <div class="mw-pod-n">28.4T</div>
+            <div class="mw-pod-sub"><span>较上轮</span><span class="mw-flat">新见</span></div>
+          </div>
+          <div class="mw-pod mw-pod-2">
+            <div class="mw-pod-h"><span class="mw-rank mw-rank-2" title="第 2 名">2</span><span class="mw-pod-r">榜内第 2 名</span></div>
+            <div class="mw-pod-slug" title="deepseek/deepseek-v4.1-flash">deepseek/deepseek-v4.1-flash</div>
+            <div class="mw-pod-n">22.7T</div>
+            <div class="mw-pod-sub"><span>较上轮</span><span class="mw-up">▲3</span></div>
+          </div>
+          <div class="mw-pod mw-pod-3">
+            <div class="mw-pod-h"><span class="mw-rank mw-rank-3" title="第 3 名">3</span><span class="mw-pod-r">榜内第 3 名</span></div>
+            <div class="mw-pod-slug" title="xiaomi/mimo-v2.6-flash">xiaomi/mimo-v2.6-flash</div>
+            <div class="mw-pod-n">9.10T</div>
+            <div class="mw-pod-sub"><span>较上轮</span><span class="mw-flat">新见</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 总览下半区：各取前几条，其余靠「全部 →」切页签 -->
+    <div class="mw-cols">
+      <section class="mw-card">
+        <div class="mw-card-h">
+          <span class="mw-card-t">近 7 天新上</span>
+          <span class="mw-card-n mw-num">6 条</span>
+          <button class="mw-link" data-go="new">全部 →</button>
+        </div>
+        <div class="mw-card-b">
+          <div class="mw-mini"><span class="mw-mini-t" title="openai/gpt-6.1-sol-pro">OpenAI: GPT-6.1 Sol Pro</span><span class="mw-mini-s">2026-09-30</span><span class="mw-mini-n">1.05M · $2.00</span></div>
+          <div class="mw-mini"><span class="mw-mini-t" title="openai/gpt-6.1-sol">OpenAI: GPT-6.1 Sol</span><span class="mw-mini-s">2026-09-30</span><span class="mw-mini-n">1.05M · $2.00</span></div>
+          <div class="mw-mini"><span class="mw-mini-t" title="anthropic/claude-sonnet-5.5">Anthropic: Claude Sonnet 5.5</span><span class="mw-mini-s">2026-09-29</span><span class="mw-mini-n">1.00M · $2.00</span></div>
+        </div>
+      </section>
+      <section class="mw-card">
+        <div class="mw-card-h">
+          <span class="mw-card-t">最近变化</span>
+          <span class="mw-card-n mw-num">6 条</span>
+          <button class="mw-link" data-go="events">全部 →</button>
+        </div>
+        <div class="mw-card-b">
+          <!-- 相对时间一律以「本轮检查时刻」为基准（fmtAge(x, snap.at)），不是以浏览器当前时刻为基准 -->
+          <div class="mw-mini"><span class="mw-mini-t">首次建档</span><span class="mw-mini-s">首轮建档：本轮起开始对比</span><span class="mw-mini-n mw-num">11 分钟前</span></div>
+          <div class="mw-mini"><span class="mw-mini-t">数据源故障</span><span class="mw-mini-s">热门周榜源：页面结构变化：没找到 flight 数据段</span><span class="mw-mini-n mw-num">刚刚</span></div>
+          <div class="mw-mini"><span class="mw-mini-t">新晋周榜</span><span class="mw-mini-s">stealth/space-bunny-alpha</span><span class="mw-mini-n mw-num">5 小时前</span></div>
+          <div class="mw-mini"><span class="mw-mini-t">新上模型</span><span class="mw-mini-s">openai/gpt-6.1-sol-pro</span><span class="mw-mini-n mw-num">1 天前</span></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ================= 热门周榜 ================= -->
+  <div class="mw-panel" id="p-top" hidden>
+    <section class="mw-card">
+      <div class="mw-card-h"><span class="mw-card-t">热门周榜</span><span class="mw-card-n mw-num">15 条</span></div>
+      <div class="mw-card-b">
+        <div class="mw-notice mw-notice-err">本轮榜单源故障：页面结构变化：没找到 flight 数据段；下面显示的是上次成功数据</div>
+      </div>
+      <table class="mw-tbl">
+        <colgroup><col style="width:46px"><col><col style="width:84px"><col style="width:92px"><col style="width:76px"></colgroup>
+        <thead><tr><th>#</th><th>模型</th><th class="mw-r">周 token</th><th>量级</th><th class="mw-r">较上轮</th></tr></thead>
+        <tbody>
+          <tr class="mw-tr-medal"><td class="mw-r"><span class="mw-rank mw-rank-1" title="第 1 名">1</span></td><td class="mw-name" title="stealth/space-bunny-alpha">stealth/space-bunny-alpha</td><td class="mw-r mw-num">28.4T</td><td><div class="mw-bar mw-bar-1"><i style="width:100%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr class="mw-tr-medal"><td class="mw-r"><span class="mw-rank mw-rank-2" title="第 2 名">2</span></td><td class="mw-name" title="deepseek/deepseek-v4.1-flash">deepseek/deepseek-v4.1-flash</td><td class="mw-r mw-num">22.7T</td><td><div class="mw-bar mw-bar-2"><i style="width:80%"></i></div></td><td class="mw-r mw-num mw-up">▲3</td></tr>
+          <tr class="mw-tr-medal"><td class="mw-r"><span class="mw-rank mw-rank-3" title="第 3 名">3</span></td><td class="mw-name" title="xiaomi/mimo-v2.6-flash">xiaomi/mimo-v2.6-flash</td><td class="mw-r mw-num">9.10T</td><td><div class="mw-bar mw-bar-3"><i style="width:32%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">4</span></td><td class="mw-name" title="openai/gpt-5.6-luna">openai/gpt-5.6-luna</td><td class="mw-r mw-num">7.75T</td><td><div class="mw-bar mw-bar-n"><i style="width:27%"></i></div></td><td class="mw-r mw-num mw-down">▼2</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">5</span></td><td class="mw-name" title="deepseek/deepseek-v4-flash">deepseek/deepseek-v4-flash</td><td class="mw-r mw-num">7.04T</td><td><div class="mw-bar mw-bar-n"><i style="width:25%"></i></div></td><td class="mw-r mw-num mw-up">▲1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">6</span></td><td class="mw-name" title="openai/gpt-6-luna">openai/gpt-6-luna</td><td class="mw-r mw-num">5.05T</td><td><div class="mw-bar mw-bar-n"><i style="width:18%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">7</span></td><td class="mw-name" title="deepseek/deepseek-v4-flash-20260423">deepseek/deepseek-v4-flash-20260423</td><td class="mw-r mw-num">3.20T</td><td><div class="mw-bar mw-bar-n"><i style="width:11%"></i></div></td><td class="mw-r mw-num mw-up">▲4</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">8</span></td><td class="mw-name" title="typesafe/jev-1.13">typesafe/jev-1.13</td><td class="mw-r mw-num">2.96T</td><td><div class="mw-bar mw-bar-n"><i style="width:10%"></i></div></td><td class="mw-r mw-num mw-down">▼1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">9</span></td><td class="mw-name" title="z-ai/glm-5.3">z-ai/glm-5.3</td><td class="mw-r mw-num">2.74T</td><td><div class="mw-bar mw-bar-n"><i style="width:10%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">10</span></td><td class="mw-name" title="google/gemini-3.8-flash">google/gemini-3.8-flash</td><td class="mw-r mw-num">2.11T</td><td><div class="mw-bar mw-bar-n"><i style="width:7%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">11</span></td><td class="mw-name" title="anthropic/claude-opus-5.5">anthropic/claude-opus-5.5</td><td class="mw-r mw-num">1.93T</td><td><div class="mw-bar mw-bar-n"><i style="width:7%"></i></div></td><td class="mw-r mw-num mw-down">▼3</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">12</span></td><td class="mw-name" title="moonshotai/kimi-k3">moonshotai/kimi-k3</td><td class="mw-r mw-num">1.56T</td><td><div class="mw-bar mw-bar-n"><i style="width:5%"></i></div></td><td class="mw-r mw-num mw-up">▲2</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">13</span></td><td class="mw-name" title="openai/gpt-5.6-sol">openai/gpt-5.6-sol</td><td class="mw-r mw-num">1.54T</td><td><div class="mw-bar mw-bar-n"><i style="width:5%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">14</span></td><td class="mw-name" title="anthropic/claude-sonnet-5">anthropic/claude-sonnet-5</td><td class="mw-r mw-num">1.36T</td><td><div class="mw-bar mw-bar-n"><i style="width:5%"></i></div></td><td class="mw-r mw-num mw-down">▼1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n">15</span></td><td class="mw-name" title="upstage/solar-pro4">upstage/solar-pro4</td><td class="mw-r mw-num">1.36T</td><td><div class="mw-bar mw-bar-n"><i style="width:5%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+        </tbody>
+      </table>
+      <p class="mw-note">来源：榜单页内嵌数据（非官方接口），页面改版会失效 · 名次差按上一轮周榜计算，「新见」= 上轮不在榜或首轮无对比</p>
+    </section>
+  </div>
+
+  <!-- ================= 新上模型 ================= -->
+  <div class="mw-panel" id="p-new" hidden>
+    <section class="mw-card">
+      <div class="mw-card-h"><span class="mw-card-t">近 7 天新上</span><span class="mw-card-n mw-num">6 个</span></div>
+      <table class="mw-tbl">
+        <colgroup><col><col style="width:112px"><col style="width:92px"><col style="width:104px"><col style="width:104px"></colgroup>
+        <thead><tr><th>模型</th><th class="mw-r">上架</th><th class="mw-r">上下文</th><th class="mw-r">输入 $/1M</th><th class="mw-r">输出 $/1M</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mw-name" title="openai/gpt-6.1-sol-pro">OpenAI: GPT-6.1 Sol Pro</span><span class="mw-slug">openai/gpt-6.1-sol-pro</span></td><td class="mw-r mw-num">2026-09-30</td><td class="mw-r mw-num">1.05M</td><td class="mw-r mw-num">$2.00</td><td class="mw-r mw-num">$10.00</td></tr>
+          <tr><td><span class="mw-name" title="openai/gpt-6.1-sol">OpenAI: GPT-6.1 Sol</span><span class="mw-slug">openai/gpt-6.1-sol</span></td><td class="mw-r mw-num">2026-09-30</td><td class="mw-r mw-num">1.05M</td><td class="mw-r mw-num">$2.00</td><td class="mw-r mw-num">$10.00</td></tr>
+          <tr><td><span class="mw-name" title="anthropic/claude-sonnet-5.5">Anthropic: Claude Sonnet 5.5</span><span class="mw-slug">anthropic/claude-sonnet-5.5</span></td><td class="mw-r mw-num">2026-09-29</td><td class="mw-r mw-num">1.00M</td><td class="mw-r mw-num">$2.00</td><td class="mw-r mw-num">$10.00</td></tr>
+          <tr><td><span class="mw-name" title="anthropic/claude-sonnet-5.5:batch">Anthropic: Claude Sonnet 5.5 (batch)</span><span class="mw-slug">anthropic/claude-sonnet-5.5:batch</span></td><td class="mw-r mw-num">2026-09-29</td><td class="mw-r mw-num">1.00M</td><td class="mw-r mw-num">$1.00</td><td class="mw-r mw-num">$5.00</td></tr>
+          <tr><td><span class="mw-name" title="typesafe/jev-router">TypeSafe: Jev Router</span><span class="mw-slug">typesafe/jev-router</span></td><td class="mw-r mw-num">2026-09-26</td><td class="mw-r mw-num">1.00M</td><td class="mw-r mw-num">—</td><td class="mw-r mw-num">—</td></tr>
+          <tr><td><span class="mw-name" title="perceptron/perceptron-mk1.5">Perceptron: Perceptron Mk1.5</span><span class="mw-slug">perceptron/perceptron-mk1.5</span></td><td class="mw-r mw-num">2026-09-26</td><td class="mw-r mw-num">37K</td><td class="mw-r mw-num">$0.15</td><td class="mw-r mw-num">$1.50</td></tr>
+        </tbody>
+      </table>
+      <p class="mw-note">口径：官方清单 API 的 created 时间戳，含 :batch 等变体行</p>
+    </section>
+  </div>
+
+  <!-- ================= 变化记录 ================= -->
+  <div class="mw-panel" id="p-events" hidden>
+    <section class="mw-card">
+      <div class="mw-card-h"><span class="mw-card-t">变化记录</span><span class="mw-card-n mw-num">6 条</span></div>
+      <div class="mw-scroll">
+        <ul class="mw-tl">
+          <li data-kind="baseline"><span class="mw-chip">首次建档</span><span class="mw-tl-body">首轮建档：本轮起开始对比</span><span class="mw-ago mw-num">11 分钟前</span></li>
+          <li data-kind="source_error"><span class="mw-chip">数据源故障</span><span class="mw-tl-body">热门周榜源：页面结构变化：没找到 flight 数据段</span><span class="mw-ago mw-num">刚刚</span></li>
+          <li data-kind="top_enter"><span class="mw-chip">新晋周榜</span><span class="mw-tl-body">stealth/space-bunny-alpha</span><span class="mw-ago mw-num">5 小时前</span></li>
+          <li data-kind="new_model"><span class="mw-chip">新上模型</span><span class="mw-tl-body">openai/gpt-6.1-sol-pro<span class="mw-sub">OpenAI: GPT-6.1 Sol Pro</span></span><span class="mw-ago mw-num">1 天前</span></li>
+          <li data-kind="top_move"><span class="mw-chip">周榜位次变化</span><span class="mw-tl-body">openai/gpt-5.6-luna<span class="mw-sub">2 → 4</span></span><span class="mw-ago mw-num">1 天前</span></li>
+          <li data-kind="removed_model"><span class="mw-chip">模型下架</span><span class="mw-tl-body">meta/llama-4-scout</span><span class="mw-ago mw-num">2 天前</span></li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <!-- ================= 设置 ================= -->
+  <div class="mw-panel" id="p-settings" hidden>
+    <section class="mw-card">
+      <div class="mw-card-h">
+        <span class="mw-card-t">监测频率与容量</span>
+        <span class="mw-card-n">改动即生效</span>
+        <span class="mw-saved mw-num">已保存 · 11:50</span>
+      </div>
+      <div class="mw-card-b">
+        <div class="mw-setrow">
+          <span class="mw-setlabel">检查间隔</span>
+          <span class="mw-seg"><button class="on">1 小时</button><button>6 小时</button><button>12 小时</button><button>24 小时</button></span>
+        </div>
+        <div class="mw-setrow">
+          <span class="mw-setlabel">榜单条数</span>
+          <button class="mw-btn mw-step">−</button><span class="mw-num mw-count">15</span><button class="mw-btn mw-step">+</button>
+          <span class="mw-sub mw-num">条（5–20）</span>
+        </div>
+        <div class="mw-setrow">
+          <span class="mw-setlabel">事件保留</span>
+          <button class="mw-btn mw-step">−</button><span class="mw-num mw-count">500</span><button class="mw-btn mw-step">+</button>
+          <span class="mw-sub mw-num">条（超出裁老，50–2000）</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="mw-card">
+      <div class="mw-card-h">
+        <span class="mw-card-t">运行环境</span>
+        <span class="mw-card-n">宿主能力 · 只读</span>
+      </div>
+      <div class="mw-card-b">
+        <div class="mw-srcrow"><i class="mw-dot mw-dot-ok"></i><b>宿主存储 storageDomain</b><span class="mw-sub">在位</span></div>
+        <div class="mw-srcrow"><i class="mw-dot mw-dot-ok"></i><b>宿主定时器 ctx.interval</b><span class="mw-sub">在位</span></div>
+        <div class="mw-srcrow"><i class="mw-dot mw-dot-ok"></i><b>宿主 Web 服务</b><span class="mw-sub">在位</span></div>
+      </div>
+    </section>
+  </div>
+
+  <p class="mw-disclaimer">本插件不发起任何对话、不代理请求、不推送外部通知；唯一出网动作是每轮检查对 openrouter.ai 的两次只读 GET。</p>
+</div>
+
+<script>
+(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.mw-tab'));
+  var IDS = ['overview', 'top', 'new', 'events', 'settings'];
+
+  function show(id) {
+    if (IDS.indexOf(id) < 0) id = 'overview';
+    IDS.forEach(function (k) {
+      var el = document.getElementById('p-' + k);
+      if (el) el.hidden = k !== id;
+    });
+    tabs.forEach(function (b) { b.classList.toggle('on', b.dataset.tab === id); });
+  }
+
+  function fromHash() { return (location.hash || '').replace(/^#tab-/, ''); }
+
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () { location.hash = 'tab-' + b.dataset.tab; });
+  });
+  Array.prototype.slice.call(document.querySelectorAll('[data-go]')).forEach(function (b) {
+    b.addEventListener('click', function () { location.hash = 'tab-' + b.dataset.go; });
+  });
+  window.addEventListener('hashchange', function () { show(fromHash()); });
+  show(fromHash());
+})();
+</script>
+</body>
+</html>

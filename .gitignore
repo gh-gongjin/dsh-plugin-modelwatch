@@ -1,0 +1,12 @@
+node_modules/
+tmp/
+.workbuddy/
+*.log
+
+# 运行时数据（留痕走宿主存储，不落本仓库目录）
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sql

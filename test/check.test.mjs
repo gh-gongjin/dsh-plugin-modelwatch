@@ -1,0 +1,298 @@
+import { check, runAll, assert } from './_helpers.mjs';
+import { createCheckService } from '../lib/check.js';
+
+const PREFS = { intervalMin: 60, topN: 15, keepEvents: 500 };
+
+function memStores({ initialState = null } = {}) {
+  let state = initialState;
+  const events = [];
+  const trims = [];
+  return {
+    events,
+    trims,
+    getState: () => state,
+    stateStore: {
+      available: true,
+      read: async () => state,
+      write: async (row) => { state = { ...row, modelIds: [...row.modelIds], top: row.top.map((r) => ({ ...r })) }; return state; },
+      close: async () => {},
+    },
+    eventStore: {
+      available: true,
+      append: async (e) => { events.push({ ...e }); return e; },
+      list: async () => [...events].reverse(),
+      trim: async (keep) => { trims.push(keep); return 0; },
+      close: async () => {},
+    },
+  };
+}
+
+/** 按调用顺序吐出预置结果；用完后重复最后一个（方便只关心前两轮的用例）。 */
+function scripter(list) {
+  let i = 0;
+  return async () => {
+    const r = list[Math.min(i, list.length - 1)];
+    i += 1;
+    return typeof r === 'function' ? r() : r;
+  };
+}
+const modelsOk = (ids, nameOf = (id) => `N:${id}`) => ({
+  ok: true,
+  rows: ids.map((id, k) => ({ id, name: nameOf(id), created: 1790700000 + k })),
+});
+const rankOk = (slugs) => ({
+  ok: true,
+  view: 'week',
+  rows: slugs.map((slug, k) => ({ slug, tokens: 1000 - k })),
+});
+const modelsBad = (error) => ({ ok: false, error });
+const rankBad = (reason) => ({ ok: false, reason });
+
+function makeCheck({ stores, m, r, getIntervalFn, nowStart = 1790700000000, onEvent = null, logger = null }) {
+  let t = nowStart;
+  return createCheckService({
+    getPrefs: () => PREFS,
+    stateStore: stores.stateStore,
+    eventStore: stores.eventStore,
+    logger,
+    now: () => (t += 1000),
+    getIntervalFn: getIntervalFn ?? (() => undefined),
+    fetchModelsFn: scripter(m ?? [modelsOk(['a/x'])]),
+    fetchRankingsFn: scripter(r ?? [rankOk(['a/x'])]),
+    onEvent,
+  });
+}
+
+check('check-01 首轮：只产 baseline，不产 diff 事件，state 落 baseline 标记', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores, m: [modelsOk(['a/x', 'b/y'])], r: [rankOk(['a/x', 'b/y'])] });
+  const res = await svc.run();
+  assert.equal(res.firstRun, true);
+  assert.equal(stores.events.length, 1);
+  assert.equal(stores.events[0].kind, 'baseline');
+  assert.equal(stores.getState().modelCount, 2);
+  assert.equal(stores.getState().baseline, true);
+  assert.equal(res.produced.new_model, 0);
+});
+
+check('check-02 第二轮：上下架各产一条，detail 带模型名', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a/x', 'b/y', 'c/z']), modelsOk(['a/x', 'c/z', 'd/w'])],
+    r: [rankOk(['a/x']), rankOk(['a/x'])] });
+  await svc.run();
+  await svc.run();
+  const kinds = stores.events.map((e) => `${e.kind}:${e.slug}`);
+  assert.ok(kinds.includes('new_model:d/w'), kinds.join(','));
+  assert.ok(kinds.includes('removed_model:b/y'), kinds.join(','));
+  const added = stores.events.find((e) => e.kind === 'new_model');
+  assert.equal(added.detail, 'N:d/w');
+});
+
+check('check-03 榜单第二轮：进/出/挪位≥3 各记一条，挪 2 不算（噪声闸）', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['m1', 'm2', 'm3', 'm4', 'm5']), modelsOk(['m1', 'm2', 'm3', 'm4', 'm5'])],
+    r: [rankOk(['m1', 'm2', 'm3', 'm4', 'm5']), rankOk(['m1', 'm3', 'm4', 'm2', 'm5'])] });
+  // 第一轮后手动把 prev 的 rank 拉开：m2 第 2→第 4（挪 2，不记）；m3 第 3→第 2（挪 1，不记）
+  await svc.run();
+  stores.events.length = 0;
+  await svc.run();
+  const kinds = stores.events.map((e) => e.kind);
+  assert.ok(!kinds.includes('top_enter') && !kinds.includes('top_exit'), '集合没变不该有进出');
+  assert.ok(!kinds.includes('top_move'), `挪 1/2 都超不过噪声闸：${kinds.join(',')}`);
+
+  const stores2 = memStores();
+  const svc2 = makeCheck({ stores: stores2,
+    m: [modelsOk(['m1', 'm2', 'm3', 'm4', 'm5']), modelsOk(['m1', 'm2', 'm3', 'm4', 'm5'])],
+    r: [rankOk(['m1', 'm2', 'm3', 'm4', 'm5']), rankOk(['m5', 'm1', 'm2', 'm3', 'm4'])] });
+  await svc2.run();
+  stores2.events.length = 0;
+  await svc2.run();
+  const move = stores2.events.filter((e) => e.kind === 'top_move');
+  assert.ok(move.some((e) => e.slug === 'm5' && e.detail === '5 → 1'), JSON.stringify(move));
+  assert.ok(!move.some((e) => e.slug === 'm1'), 'm1 从 1→2 挪 1，不该记');
+});
+
+check('check-04 榜单进/出榜：各一条且方向正确', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['x', 'y', 'z']), modelsOk(['x', 'y', 'z', 'w'])],
+    r: [rankOk(['x', 'y', 'z']), rankOk(['x', 'y', 'w'])] });
+  await svc.run();
+  stores.events.length = 0;
+  await svc.run();
+  const kinds = stores.events.map((e) => `${e.kind}:${e.slug}`);
+  assert.ok(kinds.includes('top_enter:w'), kinds.join(','));
+  assert.ok(kinds.includes('top_exit:z'), kinds.join(','));
+});
+
+check('check-05 源故障只记翻转：连坏两轮记一条，恢复再记一条', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a']), modelsBad('清单源返回 503'), modelsBad('清单源返回 503'), modelsOk(['a'])],
+    r: [rankOk(['a']), rankOk(['a']), rankOk(['a']), rankOk(['a'])] });
+  await svc.run(); // baseline
+  stores.events.length = 0;
+  await svc.run(); // 坏 1 → source_error
+  const errsAfterFirst = stores.events.filter((e) => e.kind === 'source_error').length;
+  assert.equal(errsAfterFirst, 1);
+  await svc.run(); // 坏 2 → 不重复记
+  assert.equal(stores.events.filter((e) => e.kind === 'source_error').length, 1, '连坏不刷屏');
+  await svc.run(); // 恢复 → source_recover
+  assert.equal(stores.events.filter((e) => e.kind === 'source_recover').length, 1);
+  // 故障轮 state 仍写：modelsOk=false + 原因，模型计数保留旧档
+  const st = stores.getState();
+  assert.equal(st.modelsOk, true, '最后一轮已恢复');
+});
+
+check('check-06 首轮就坏：记 source_error 且 modelsOk=false 落进 state', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores, m: [modelsBad('清单源请求失败：boom')], r: [rankBad('页面结构变化')] });
+  const res = await svc.run();
+  assert.equal(res.modelsOk, false);
+  assert.equal(res.rankOk, false);
+  const st = stores.getState();
+  assert.equal(st.modelsOk, false);
+  assert.match(st.modelsError, /boom/);
+  assert.match(st.rankError, /结构变化/);
+  assert.ok(stores.events.some((e) => e.kind === 'source_error'));
+});
+
+check('check-07 清单坏不拦榜单：好的一侧照常更新与记账', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a']), modelsBad('503')],
+    r: [rankOk(['a']), rankOk(['a', 'b'])] });
+  await svc.run();
+  stores.events.length = 0;
+  const res = await svc.run();
+  assert.equal(res.rankOk, true);
+  const kinds = stores.events.map((e) => `${e.kind}:${e.slug || ''}`);
+  assert.ok(kinds.includes('top_enter:b'), kinds.join(','));
+  assert.ok(kinds.some((k) => k.startsWith('source_error')), `坏的一侧也要如实落一笔：${kinds.join(',')}`);
+});
+
+check('check-08 无存储：read 抛 → 不落库不崩，本轮判定照常算完', async () => {
+  const stores = memStores();
+  stores.stateStore.read = async () => { throw Object.assign(new Error('无域'), { code: 'X' }); };
+  let wrote = false;
+  stores.stateStore.write = async () => { wrote = true; };
+  const warns = [];
+  const svc = makeCheck({ stores, logger: { warn: (m) => warns.push(m) } });
+  const res = await svc.run();
+  assert.equal(res.modelsOk, true);
+  assert.equal(wrote, false, '读旧档失败时绝不覆盖写新档（会把老基线抹平）');
+  assert.ok(warns.length > 0, '留痕不许静默');
+});
+
+check('check-09 busy 单闸：跑中再触发抛 CHECK_BUSY，结束后闸重新放开', async () => {
+  let release = null;
+  const gate = new Promise((r) => { release = r; });
+  const stores = memStores();
+  const svc = createCheckService({
+    getPrefs: () => PREFS,
+    stateStore: stores.stateStore,
+    eventStore: stores.eventStore,
+    now: () => 1790700000000,
+    getIntervalFn: () => undefined,
+    fetchModelsFn: async () => { await gate; return modelsOk(['a']); },
+    fetchRankingsFn: async () => rankOk(['a']),
+  });
+  const p = svc.run();
+  assert.equal(svc.running, true);
+  assert.throws(() => svc.run(), (e) => e.code === 'CHECK_BUSY');
+  release();
+  await p;
+  assert.equal(svc.running, false);
+  await svc.run(); // 闸放开
+});
+
+check('check-10 每轮以 update 帧收尾，载荷带 produced', async () => {
+  const stores = memStores();
+  const frames = [];
+  const svc = makeCheck({ stores, onEvent: (ev) => frames.push(ev) });
+  await svc.run({ trigger: 'manual' });
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].type, 'update');
+  assert.equal(frames[0].trigger, 'manual');
+  assert.ok(frames[0].produced);
+});
+
+check('check-11 事件落库炸（如无存储）：一轮检查不中断，只留痕', async () => {
+  const stores = memStores();
+  stores.eventStore.append = async () => { throw new Error('CLOSED'); };
+  const warns = [];
+  const svc = makeCheck({ stores, logger: { warn: (m) => warns.push(m) }, m: [modelsOk(['a'])] });
+  const res = await svc.run();
+  assert.equal(res.at > 0, true);
+  assert.ok(warns.some((w) => w.includes('事件落库失败')));
+});
+
+check('check-12 每轮落库后按 prefs.keepEvents 裁剪流水', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores });
+  await svc.run();
+  assert.deepEqual(stores.trims, [500]);
+});
+
+check('check-13 定时节拍：宿主 timer 优先，缺了退 setInterval（unref），dispose 清干净', async () => {
+  const stores = memStores();
+  let hostCalls = 0;
+  const svc = makeCheck({ stores, getIntervalFn: () => ((fn, ms) => { hostCalls += 1; return { fn, ms, unref() {} }; }) });
+  svc.setCadence(360);
+  assert.equal(hostCalls, 1);
+  assert.equal(svc.timerBackend, 'ctx.timer');
+  svc.setCadence(60); // 重挂：旧的必须停掉
+  assert.equal(hostCalls, 2);
+  svc.dispose();
+});
+
+check('check-14 无宿主 timer 时 timerBackend 说 setInterval（能力位不许自相矛盾）', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores }); // getIntervalFn → undefined
+  svc.setCadence(60);
+  assert.equal(svc.timerBackend, 'setInterval');
+  svc.dispose();
+  assert.equal(svc.timerBackend, 'setInterval');
+});
+
+check('check-15 top 行 delta：升为正、降为负、新入榜不补 0（S17：不凭空造字段）', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['p', 'q', 'r', 's', 't']), modelsOk(['p', 'q', 'r', 's', 't'])],
+    r: [rankOk(['p', 'q', 'r', 's', 't']), rankOk(['q', 'p', 'r', 's', 't'])] });
+  await svc.run();
+  await svc.run();
+  const top = stores.getState().top;
+  const q = top.find((x) => x.slug === 'q');
+  const p = top.find((x) => x.slug === 'p');
+  assert.equal(q.delta, 1, 'q 从 2→1 是升');
+  assert.equal(p.delta, -1, 'p 从 1→2 是降');
+  const r = top.find((x) => x.slug === 'r');
+  assert.equal(r.delta, undefined, '没动的行不许带 delta 字段');
+});
+
+check('check-16 首轮榜单无对比基准：top 行一律不带 delta', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores, m: [modelsOk(['a', 'b'])], r: [rankOk(['a', 'b'])] });
+  await svc.run();
+  assert.ok(stores.getState().top.every((r) => !('delta' in r)));
+});
+
+check('check-17 榜单坏转好：只记 source_recover，不补产积压进/出/挪位（拿不到公允上轮就不记账）', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a', 'b']), modelsOk(['a', 'b']), modelsOk(['a', 'b'])],
+    r: [rankOk(['a', 'b']), rankBad('页面结构变化：没找到 flight 数据段'), rankOk(['b', 'a', 'c'])] });
+  await svc.run(); // baseline：top=[a,b]，rankOk=true
+  stores.events.length = 0;
+  await svc.run(); // 榜单坏 → source_error
+  await svc.run(); // 恢复且榜单变了：c 进榜、a/b 换位 —— 都不许补产
+  const kinds = stores.events.map((e) => e.kind);
+  assert.ok(kinds.includes('source_recover'), `恢复必须记一条：${kinds.join(',')}`);
+  assert.ok(!kinds.includes('top_enter') && !kinds.includes('top_exit') && !kinds.includes('top_move'),
+    `坏转好那轮不许补产积压账：${kinds.join(',')}`);
+});
+
+await runAll('check');
