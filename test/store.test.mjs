@@ -155,10 +155,41 @@ check('store-14 事件 kind 越界值挡在落库前（INVALID 而不是脏进�
 
 check('store-15 patch 不许把库里已存的非默认值抹回默认（读-并-写的真回归）', async () => {
   const s = makeStores();
-  await s.prefs.patch({ intervalMin: 60 });
+  // 首写必须选一个**不是出厂默认**的档位：v1.5 默认 intervalMin 改成 60 后，
+  // 再拿 60 当「已存值」测读-并-写，变异掉读-并-写也照样绿（ST-3 第二轮漏网的真因）。
+  await s.prefs.patch({ intervalMin: 720 });
   const saved = await s.prefs.patch({ topN: 8 });
-  assert.equal(saved.intervalMin, 60, '第二次只发 topN，库里的 intervalMin 必须原样还在');
+  assert.equal(saved.intervalMin, 720, '第二次只发 topN，库里的 intervalMin 必须原样还在');
   assert.equal(saved.topN, 8);
+});
+
+check('store-16 freeTop 可选字段：缺省的旧档照写照读，带脏行的新档挡在 put 之前', async () => {
+  const s = makeStores();
+  const w = await s.state.write(STATE_ROW);
+  assert.equal('freeTop' in w, false, '未填的可选数组不许留空壳字段');
+  const withFree = await s.state.write({
+    ...STATE_ROW,
+    freeTop: [{ rank: 1, slug: 'a/x:free', tokens: 5 }],
+    prevFreeTop: ['a/x:free'],
+  });
+  assert.equal(withFree.freeTop.length, 1);
+  const fr = withFree.freeTop[0];
+  assert.equal(fr.rank, 1);
+  assert.equal(fr.slug, 'a/x:free');
+  assert.equal(fr.tokens, 5);
+  assert.equal(fr.delta, undefined, '未填的 delta 不许变成 0 混进库里（与 top 行同口径）');
+  assert.deepEqual(withFree.prevFreeTop, ['a/x:free']);
+  await assert.rejects(
+    s.state.write({ ...STATE_ROW, freeTop: [{ rank: '一', slug: 'a/x:free', tokens: 5 }] }),
+    (e) => e.code === RECORDS_ERROR.INVALID, 'freeTop 行内字段同样过 TOP_ROW_SHAPE，不许因为是新字段就放水');
+  // v1.8 免费榜独立闸门：freeOk/freeError 也是可选字段，旧档照读、新档过校验
+  assert.equal('freeOk' in w, false, '缺省的 freeOk 不许留空壳字段');
+  const withFlag = await s.state.write({ ...STATE_ROW, freeOk: false, freeError: '免费榜源返回 503' });
+  assert.equal(withFlag.freeOk, false);
+  assert.equal(withFlag.freeError, '免费榜源返回 503');
+  await assert.rejects(
+    s.state.write({ ...STATE_ROW, freeOk: 'yes' }),
+    (e) => e.code === RECORDS_ERROR.INVALID, 'freeOk 必须是布尔，脏值挡在 put 之前');
 });
 
 await runAll('store');

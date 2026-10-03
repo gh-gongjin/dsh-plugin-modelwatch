@@ -19,26 +19,36 @@
 |---|---|---|---|
 | 模型清单 | `GET https://openrouter.ai/api/v1/models` | 官方公开 API | 失败 ⇒ 状态卡就地写「清单源不可用：<原因>」，保留上次快照 |
 | 热门周榜 | `GET https://openrouter.ai/rankings`（HTML） | **非官方**：页面内嵌 react-query 水合数据，改版即失效 | 解析失败 ⇒ 榜单卡就地写「榜单源结构变化，解析失败」+ 保留上次榜单；卡片标题旁常驻小字「来源：榜单页内嵌数据，非官方接口」 |
+| 免费榜单 | `GET https://openrouter.ai/api/frontend/v1/rankings/models?view=week`（JSON） | **非官方**：榜单页自己的前端读接口，接口变化即失效 | 失败 ⇒ 免费榜卡就地写「本轮榜单源故障：<原因>；下面显示的是上次成功数据」+ 保留上次免费榜；来源注常驻 |
 
-- 全插件对网络是**只读 GET**，不带任何 key、不 POST 到 openrouter。
+- 全插件对网络是**只读 GET**（每轮三次），不带任何 key、不 POST 到 openrouter。
 - 失败原因进事件表 `kind:'source_error'`，让用户能回看「哪天开始坏的」。
+- 三个源**各自一道闸门**（`modelsOk` / `rankOk` / `freeOk`）：坏在哪一侧就只标注哪一侧，绝不连坐。
 
 ## 2. 热度口径
 
 周榜 = flight 字符串逐段 `JSON.parse` 反转义 → 拼接 → 平衡花括号扫描取
-`{"dehydratedAt"…}` 对象 → `queryKey` 含 `"rankings","models"` 的那条 → `state.data`（20 行/周，按 token 用量降序）。
-取前 `topN`（默认 15）展示。`variant` 只认 `standard`，`:batch` 等变体不单列。
+`{"dehydratedAt"…}` 对象 → `queryKey` 含 `"rankings","models"` 的那条 → `state.data`（20 行/周，站点自己排的名次）。
+取前 `topN`（默认 15）展示。`variant` 为 `standard`（或字段缺失）的行进周榜；`free` / `:batch` 等变体一律剔除 ——
+**v1.8 起免费榜不再从这 20 行里筛**（真页里只有 1 行 free，成不了榜），改走 §1 的独立端点。
+
+免费榜 = 端点 `data` 里 `variant === 'free'` 的行，一模型一行周汇总。名次口径 = `rankingMetricValue`
+（= prompt+completion 周总量，2026-10-03 与 SSR 页逐值核对过；字段缺失才回落两项相加）。同一 slug 出现多行取
+`date` 最新的一行。slug 取 `variant_permaslug`（带 `:free` 后缀）。截到 `TOP_N_MAX=20`，界面再按 `prefs.topN` 切片。
+**端点的行序不是站点名次序**，所以免费榜按 token 量自己排 —— 来源注里如实写明这一点。
 
 ## 3. 变化判定（宿主单点）
 
 - **新上**：本轮 id 集合 − 上轮 id 集合 ⇒ `new_model`；反向 ⇒ `removed_model`。首轮只建档不产事件（状态卡写「首次建档」）。
 - **榜单**：本轮 top slug 序 vs 上轮 ⇒ `top_enter` / `top_exit`；位次挪动 ≥3 记 `top_move`。周榜按天滚动更新，日间位次挪动 <3 视为噪声，不记。
 - **近 7 天新模型**不依赖 diff：直接由 `created` 时间戳算（首轮也有东西可看）。
+- **免费榜**：`freeTop` 独立算 rank/delta（与上一轮免费榜比，同闸同规则），只落最新榜（`freeTop`/`prevFreeTop`），**不产任何流水事件** —— 变化记录只跟周榜，免费榜是展示面。坏轮冻结（`freeTop`/`prevFreeTop` 停在最后一次成功轮，不逐轮自我清空）；坏转好那一轮只记 `source_recover`，不补产积压 delta（拿不到公允上轮就不记账）。
 
 ## 4. 存储（domain `modelwatch`，三张表）
 
-- `state`（key=`latest`）：`{ at, modelCount, modelIds[], top[], prevTop[], newRecent[] }`。
+- `state`（key=`latest`）：`{ at, modelCount, modelIds[], top[], prevTop[], freeTop[], prevFreeTop[], newRecent[], modelsOk, rankOk, freeOk, ... }`。
   `modelIds` 只为 diff；`newRecent` 存近 30 天模型的规范化行（id/name/created/context/价格），界面直接渲染。
+  `freeOk` / `freeError` / `freeTop` / `prevFreeTop` 是 v1.8 新增的**可选字段**：改动上线前写的旧档照读，快照里 `free.rows` 给空数组、`sources.free` 直说「还没跑过第一轮检查」。
 - `events`（key=毫秒+序号）：追加式变更流水，`{ id, at, kind, slug, detail }`；保留 `keepEvents`（默认 500）条，超出裁老。
 - `prefs`（key=`prefs`）：`{ intervalMin, topN, keepEvents }`，写入即生效（重挂定时器）。
 
@@ -58,30 +68,32 @@ KV 不可用 ⇒ 监控照跑，但状态卡写「存储不可用：本轮变化
 | `GET /api/events?limit=` | 变更流水（默认 100，上限 500） |
 | `GET/POST /api/prefs` | 读/写偏好（写整份读-并-写，同 sysops 口径） |
 
-## 7. 面板（浏览器半边，页头 + 五页签）
+## 7. 面板（浏览器半边，页头 + 六页签）
 
 版式于 2026-10-01 两轮重构：v1.1 废掉 2×2 等高网格，v1.3 改为**分页签**（均见 §9）。
-结构：`Header → TabBar(5) → Panel(当前页签) → disclaimer`，同一时刻只渲染一个面板。
+结构：`Header → TabBar(6) → Panel(当前页签)`，同一时刻只渲染一个面板。
 
-**页头**（`.mw-head`）：左＝标题 + 口径小字；右＝数据源状态 pill（点 + 「数据源全部在位 / X故障 / 部分源未就位 / 等待首帧」，`title` 落故障原因与推流说明）+ 检查时刻与模型总数 + **唯一的主操作**「立即检查」（跑时禁用 + 「检查中…」）。
+**页头**（`.mw-head`）：左＝标题；右＝数据源状态 pill（点 + 「数据源全部在位 / X故障 / 部分源未就位 / 等待首帧」，`title` 落故障原因与推流说明）+ 检查时刻与模型总数 + **唯一的主操作**「立即检查」（跑时禁用 + 「检查中…」）。
 一个功能只留一个入口 —— 总览页不再重复放「立即检查」（v1.1 曾两处并存）。
 
-**五个页签**（`TABS` 常量，标签与顺序写在 `client.js`；判定口径仍全部来自宿主载荷）：
+**六个页签**（`TABS` 常量，标签与顺序写在 `client.js`；判定口径仍全部来自宿主载荷）：
 
 | 页签 | id | 计数徽标 | 内容 |
 |---|---|---|---|
 | 总览 | `overview` | — | 数据源状态 → 本周前三 → 新上/变化各取前几条（默认页） |
 | 热门周榜 | `top` | 榜内行数 | 完整榜单表 |
+| 免费榜单 | `free` | 免费榜行数 | 独立源（§1 第三行）的免费变体周榜，与 `top` 同一张表组件、**各挂各的源闸门** |
 | 新上模型 | `new` | 近 N 天条数 | 新上表（5 列） |
 | 变化记录 | `events` | 事件条数 | 变化时间线 |
 | 设置 | `settings` | — | 偏好三项 + 运行环境（只读） |
 
 计数徽标只在有数据时渲染，数字**跟着快照走**，不写死。
 
-1. **数据源状态**（总览首块，`.mw-srcrow`）：两个源各一行（点 + 源名 + 「在位 · 上次成功 <相对时间>」/「故障 · <原因原样念出>」）。存储不可用 / 推流断开 / 检查失败的说明各占一行落在本卡内（`.mw-notice`，故障用 `-err` 变体）。**无操作按钮**。
+1. **数据源状态**（总览首块，`.mw-srcrow`）：三个源各一行（点 + 源名 + 「在位 · 上次成功 <相对时间>」/「故障 · <原因原样念出>」）。存储不可用 / 推流断开 / 检查失败的说明各占一行落在本卡内（`.mw-notice`，故障用 `-err` 变体）。**无操作按钮**。
 2. **本周前三**（`.mw-podium`，总览）：三张并排卡（`auto-fit, minmax(196px,1fr)`，窄了自动降为单列），金/银/铜徽标 + 「榜内第 N 名」+ slug + **大号 token 数**（20px）+ 较上轮变化。卡头右侧「完整榜单 →」切到 `top` 页签。
 3. **总览下半区**（`.mw-cols` 1.6fr / 1fr）：左「近 N 天新上」、右「最近变化」，各放 3 / 4 条，卡头「全部 →」切到对应页签；空态各写一句实话。
 4. **热门周榜**（`top`）：表格列 `# / 模型 / 周 token / 量级 / 较上轮`。名次走 **`RankBadge`**：1/2/3 = 金 `#e8b530` / 银 `#c3c9d2` / 铜 `#cf9a63` 实底徽标，第 4 名起回落中性描边；前三行整行淡金底（`.mw-tr-medal`）。**量级条**按榜首归一（`max(4%, round(tokens/max)·100%)`，4% 保底才看得见），前三名用同色系 —— 纯文本列看不出第 1 名与第 15 名差 20 倍。源故障但留有旧数据时，表上方就地写「下面显示的是上次成功数据」。
+4b. **免费榜单**（`free`）：与 `top` 共用 `TopCard`（`board` 选数据 `snap.top` / `snap.free`，`srcKey` 选闸门 `sources.rankings` / `sources.free`）—— 故障横幅、量级条、名次徽标、`note` 吃宿主文案的口径完全一致，但**两榜各挂各的闸**：周榜源坏不许在免费榜页冒横幅，反之亦然（`srcKey` 由页签路由传下去，client-24 钉住）。空态写「免费榜源还没有成功返回过模型」。
 5. **新上模型**（`new`）：表格（模型 name+slug 双行 / 上架 / 上下文 / 输入价 / 输出价），`created` 现算，与 diff 无关。首轮建档时表上方写「首轮建档：上架/下架对比从下一轮开始」。
 6. **变化记录**（`events`）：时间线，kind 中文标签（表在宿主侧 `lib/domain.js` 的 `EVENT_KIND_LABELS`，界面只查表）+ 左圆点按 kind 着色；限高 420px 内滚。
 7. **设置**（`settings`）：两张卡。「监测频率与容量」含间隔分段器 + 榜单条数 ± + **事件保留 ±**，卡头右侧就地写「已保存 · HH:MM」（零浮层）。「运行环境」只读列出 `capabilityRows` 三项能力（宿主快照原样渲染，不自己编）。
@@ -109,11 +121,18 @@ KV 不可用 ⇒ 监控照跑，但状态卡写「存储不可用：本轮变化
 
 ```
 { at, caps, capabilityRows, prefs,
-  sources: { models: { ok, error, checkedAt }, rankings: { ok, error, checkedAt, unofficial: true } },
+  sources: { models: { ok, error, checkedAt },
+             rankings: { ok, error, checkedAt, unofficial: true, note },
+             free: { ok, error, checkedAt, unofficial: true, note } },
   models: { count, newThisWeek: [row], baseline: bool },
   top: { rows: [ { rank, slug, tokens, delta } ], prev: [slug], note },
+  free: { rows: [ { rank, slug, tokens, delta } ], days: 7, note },  // v1.8 独立源；slug 带 :free 后缀
   events: [ { id, at, kind, slug, detail } ] }
 ```
+
+`state` 表里与免费榜相关的键：`freeTop[]` / `prevFreeTop[]` / `freeOk` / `freeError`，全部是**可选字段**
+（旧档照读，见 §4）。页头 pill 的三源名册（`清单源 / 周榜源 / 免费榜源`）在 `client.js` 的 `Header` 里，
+坏因与「部分源未就位」都从 `sources` 现算。
 
 ## 9. 验收台账（每轮追加 §9.x）
 
@@ -123,6 +142,24 @@ KV 不可用 ⇒ 监控照跑，但状态卡写「存储不可用：本轮变化
   - 变异电池 `tmp/mut_mw01.mjs`：38 条全红（首轮 5 条漏网 CK-3/CK-8/ST-3/AP-5/CL-2，已补 check-17、store-15、api-20、client-04 K 档后复跑全抓）；跑完按字节还原、六文件 sha 一致。
   - 原型截图核对：`prototype/index.html` 经无头 Chrome 出图（tmp/mw-prototype2.png），四卡布局、故障横幅+上次数据标注、新见/▲/▼/—、设置分段均正常；顺手修掉演示数据「5 个 vs 3 行」的自相矛盾。
 - v1 真机首轮（2026-10-01）：挂载后宿主 web-boot 抛 `invalid plugin, expect function or object with an "apply" method, received object`。根因：client.js 的 ModuleLoader factory 结尾写了 `return module;`，宿主吃的是 factory **返回值**当模块导出（sysops 是 `return module.exports;`），外层自然找不到 apply。该错误从 renderer 抛出、经 `DESKTOP_IPC.bootFailed` 转成主进程 crash 日志，排查时要先去 `dsh-web-frontend` 的 assets 里找同文案。已修 + client.test 沙箱改为与宿主同口径（返回值即导出）+ 变异电池加 CL-7 钉死。
+- v1.6 免费榜单 tab（2026-10-03）：
+  - 数据：免费行取自**同一榜单源** week 数据里 `variant=free` 的行（slug 用 `variant_permaslug`，带 `:free` 后缀），零新增出网请求。真页探针（`F:/dsh-plugins/tmp/peek-views.mjs`，2026-10-03）核实榜单页只水合 `week/apps/benchmarks` 三个 queryKey，**没有独立免费榜数据段** —— 免费榜只能从周榜行里分。
+  - 宿主：`parseRankingsHtml` 增返 `freeRows`（周榜满 20 不再 break，防混排漏收）；`check` 为免费榜独立算 rank/delta，落 `freeTop`/`prevFreeTop`（domain 可选字段，上线前的旧档照读照写）；快照增 `free`（rows 按 prefs.topN 切片，来源注 `FREE_RANKINGS_NOTE` 宿主单点）。免费榜进/出/挪位**不进流水**。
+  - 界面：第 3 个页签 `free`；`TopCard` 泛化成 `board` 参数，周榜/免费榜同表同降级；页签计数跟快照走。
+  - 验收：全套 130 过 / 0 挂（api 21、check 19、client 22、host-compat 12、models 16、rankings 24、store 16）；变异电池加 10 条（RK-5..7 / CK-9..10 / AP-9..10 / CL-8..10），49 条全红、六文件 sha 还原一致；原型截图核对 `tmp/tab-free.png`（金银铜 + 量级条 + 故障横幅 + 来源注）与 `tmp/tab-top2.png`（周榜回归）。
+  - 顺手清掉两条陈年漏网：**CK-4**（摘 busy 闸）原本把 check 套件挂成 unsettled await —— check-09 里第二轮 `svc.run()` 与假 gate 互等死锁，连 FAIL 都吐不出、电池误判绿；改成「先取第二轮 promise → 放闸 → 再断言」。**ST-3**（patch 丢读-并-写）重新漏网是因为 store-15 的"已存值"60 恰好等于 v1.5 起的出厂默认 —— 教训：**读-并-写用例的首写值必须选非默认档**（已改 720）。
+- v1.8 免费榜换成独立源（2026-10-03）：用户反馈「现在免费榜单只有一个，免费榜单能单独抓取吗，不跟热门周榜一起，不然数据太少了」。
+  - 根因：v1.6 的免费行取自榜单页 SSR 的那 **20 行**周榜，真页里只有 1 行是 `:free` 变体 —— 不是抓取漏了，是数据本就只有这么多。
+  - 换源：改抓 `GET https://openrouter.ai/api/frontend/v1/rankings/models?view=week`（榜单页自己的前端读接口，仍是**只读 GET、无 key**）。同一份周数据里 free 变体有 **27 个模型**，界面按 `prefs.topN` 切 15 条展示。真页响应留在 `test/fixtures/free-week.json`（27 free + 12 standard 的裁剪夹具）。
+  - 口径：名次 = `rankingMetricValue`（= prompt+completion 周总量，2026-10-03 与 SSR 页逐值核对过一致；字段缺失才回落两项相加）；同 slug 多行取 `date` 最新；slug 取 `variant_permaslug`（带 `:free`）。**端点行序不是站点名次序**，所以免费榜按 token 量自己排 —— 这一点写进 `FREE_RANKINGS_NOTE`，界面上的来源注就是这句话（宿主单点）。
+  - 为什么热门周榜不跟着换：端点按 token 总量排出来的名次与站点显示的名次**不一致**（站点用自己的算法），而 SSR 那 20 行就是页面上看到的榜 —— 保住站点语义，只有免费榜换源。
+  - 宿主：`parseRankingsHtml` 不再产 `freeRows`（SSR 侧免费榜通道拆掉，rank-20 钉）；新增 `parseFreeRankingsJson` + `fetchFreeRankings`；`check` 变成**三源并行、三道独立闸门**（`modelsOk`/`rankOk`/`freeOk`，各自 flip-only 记 `source_error`、坏转好记 `source_recover`、坏轮冻结旧榜、坏转好那轮不补产积压 delta）；`state` 新增可选字段 `freeOk`/`freeError`（旧档照读，快照 `free.rows` 给空数组、`sources.free` 直说「还没跑过第一轮检查」）。免费榜仍然**不产任何流水事件**。
+  - 界面：`TopCard` 加 `srcKey` 参数 —— 周榜挂 `sources.rankings`、免费榜挂 `sources.free`，两榜各挂各的横幅；状态卡加第三行「免费榜单（非官方源）」；页头 pill 的三源名册加 `免费榜源`。
+  - 验收：全套 **135 过 / 0 挂 / 1 跳**（api 21、check 21、client 24、host-compat 11+1跳、models 16、rankings 26、store 16）；变异电池扩到 **63 条全红**（新增 RK-5..11 免费榜解析 7 条、CK-11..14 免费榜闸门 4 条、AP-11/12、CL-11..14），六文件 sha 逐字节还原 `allRestored:true`；无头 Chrome 截图核对 `tmp/v18-free.png`（15 行真数据、无横幅、来源注新口径）、`tmp/v18-overview.png`（三源三行，周榜故障不连坐免费榜）。
+  - 本轮踩到的两处（都已修 + 已定性）：
+    - **假绿来自路由没被测到**：CL-12（免费榜路由漏传 `srcKey`）第一轮是绿的 —— client-22 手搓 `freeProps` 直接渲染 `TopCard`，绕过了 `ModelwatchPage` 的 tab→组件路由。补 client-24：给测试沙箱的 `useState` 加初始值注入（`opts.tab` / `opts.snap`，`useState(null)`/`useState('overview')` 各只有一处）+ `mount()` 递归展开函数组件（fake react 不调组件），逼路由本身进断言。**教训：凡是"参数由上层传下来"的组件契约，必须至少有一条用例走真实调用点。**
+    - **变异电池会自己骗自己**：client-24 一度是挂的状态，而整轮电池把 CL-11/CL-12 都报成"红（被抓住）" —— 套件本身在红时，任何改动都"被抓"。已把「先全套绿、再跑电池」定成顺序，且电池输出里的 `pass/fail` 读数要逐条看。**另外发现一次 Windows 写盘与子进程抢读导致的假绿**（同一变异单独重跑就变红）：整轮跑完必须对可疑的绿条目 `MUT_ONLY=<id>` 复跑一遍再定性。
+- v1.7 文案瘦身（2026-10-03）：用户贴真机截图圈掉页尾免责小字，「页面上不必要的文案都去掉」。删：页尾 disclaimer、页头口径小字（「OpenRouter 新上模型与热门/免费周榜 · 全程只读 GET」）、数据源卡头与页头重复的「检查于 X · 模型总数 N」、新上卡「口径：官方清单 API…」脚注、榜单来源注后面的「名次差按…新见=…」图例长句、事件空态的建档解释（留「还没有记录」）。**保留**：非官方源标注与来源注（诚实标注铁律）、故障横幅、状态行「在位/故障」、设置页「改动即生效」等功能性文案。改动面：`client.js`（组件 + CSS 常量）、`prototype/index.html`（同构同步）。验收：全套 129 过 / 0 挂 / 1 跳（api 21、check 19、client 22、host-compat 11+1跳、models 16、rankings 24、store 16）；变异电池 49 条全红、六文件 sha 还原一致；截图核对 `tmp/copy-overview.png`、`tmp/copy-new.png`、`tmp/copy-top.png`。
 - v1.1 版式重构（2026-10-01）：用户贴真机截图反馈「页面布局有点丑」。诊断出三处：①2×2 等高网格把「状态」卡拉到与右列表格同高，卡内空出约 150px；②周榜（主内容，15 行）被塞进半宽栏，slug 被压；③周榜不限高把页面拉到 1600px+，右栏还是一张只有 1 条记录的矮卡。改法见 §7 —— 状态压成横条（251px → 53px）、周榜进主栏、`align-items:start` 取消等高拉伸、断点改容器查询。改动面：`client.js`（CSS 常量整段 + 五个组件结构 + 页面骨架）、`prototype/index.html`（同构重写 + 演示数据补满到 6/15/6 行）。
   - 验收：client-20 版式契约 5 条，**含两条反向验证**（去掉 `align-items:start`、去掉 `.mw-setrow` 的 `flex-direction:row`，均按要求变红，还原后恢复绿）。
   - 离线预览页 `tmp/preview.html`（走 `apply` 真路径 + mini-react 跑真组件）两档核对：1400px 得双列 `805 / 503`，900px 得单列 `838`（容器查询生效）；5 张卡高 53/630/257/392/94；15 行周榜、6 行新上、6 条事件；文档 `scrollWidth == 视口`、超宽元素 0。

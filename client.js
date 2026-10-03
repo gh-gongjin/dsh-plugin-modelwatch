@@ -129,7 +129,6 @@ window.__ModuleLoader__.load({
 .mw-step{width:28px;padding:4px 0;text-align:center;font-size:14px;line-height:1}
 .mw-count{min-width:34px;text-align:center;font-weight:600}
 .mw-saved{color:var(--mw-ok);font-size:12px}
-.mw-disclaimer{margin:2px 0 0;color:var(--mw-faint);font-size:11px;line-height:1.6}
 /* ---------- 页头状态 pill ---------- */
 .mw-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
   border:1px solid var(--mw-line);background:var(--mw-soft);font-size:12px;color:var(--mw-muted);white-space:nowrap}
@@ -330,6 +329,7 @@ window.__ModuleLoader__.load({
     const TABS = [
       { id: 'overview', label: '总览' },
       { id: 'top', label: '热门周榜' },
+      { id: 'free', label: '免费榜单' },
       { id: 'new', label: '新上模型' },
       { id: 'events', label: '变化记录' },
       { id: 'settings', label: '设置' },
@@ -338,7 +338,7 @@ window.__ModuleLoader__.load({
     /** 页头：标题 + 数据源摘要 + 唯一的主操作（总览里不再放按钮 —— 一个功能只留一个入口）。 */
     function Header({ snap, conn, checking, lastErr, onCheck }) {
       const src = snap?.sources || {};
-      const NAMES = { models: '清单源', rankings: '榜单源' };
+      const NAMES = { models: '清单源', rankings: '周榜源', free: '免费榜源' };
       const bad = Object.keys(NAMES).filter((k) => src[k] && !src[k].ok);
       const absent = Object.keys(NAMES).filter((k) => !src[k]);
       let dot = 'mw-dot';
@@ -355,8 +355,7 @@ window.__ModuleLoader__.load({
       ].filter(Boolean).join('；');
       return h('header', { className: 'mw-head' },
         h('div', { className: 'mw-head-l' },
-          h('span', { className: 'mw-title' }, cfg().label || '模型监控'),
-          h('span', { className: 'mw-sub' }, 'OpenRouter 新上模型与热门周榜 · 全程只读 GET')),
+          h('span', { className: 'mw-title' }, cfg().label || '模型监控')),
         h('div', { className: 'mw-head-r' },
           h('span', { className: 'mw-pill', title: tip || undefined }, h('i', { className: dot }), text),
           snap ? h('span', { className: 'mw-sub mw-num' }, `检查于 ${fmtAge(snap.at, Date.now())} · 模型总数 ${snap.models?.count ?? '—'}`) : null,
@@ -384,12 +383,11 @@ window.__ModuleLoader__.load({
       ].filter(Boolean);
       return h('section', { className: 'mw-card' },
         h('div', { className: 'mw-card-h' },
-          h('span', { className: 'mw-card-t' }, '数据源状态'),
-          h('span', { className: 'mw-card-n mw-num' },
-            snap ? `检查于 ${fmtAge(snap.at, Date.now())} · 模型总数 ${snap.models?.count ?? '—'}` : '等待首帧')),
+          h('span', { className: 'mw-card-t' }, '数据源状态')),
         h('div', { className: 'mw-card-b' },
           row('官方清单 API', src.models),
           row('热门周榜（非官方源）', src.rankings),
+          row('免费榜单（非官方源）', src.free),
           notices.length ? notices : null));
     }
 
@@ -441,6 +439,7 @@ window.__ModuleLoader__.load({
     function TabBar({ tab, onTab, snap }) {
       const counts = {
         top: (snap?.top?.rows || []).length,
+        free: (snap?.free?.rows || []).length,
         new: (snap?.models?.newThisWeek || []).length,
         events: (snap?.events || []).length,
       };
@@ -497,19 +496,19 @@ window.__ModuleLoader__.load({
                 h('td', { className: 'mw-r mw-num' }, fmtCtx(r.contextLength)),
                 h('td', { className: 'mw-r mw-num' }, fmtPrice(r.priceInM)),
                 h('td', { className: 'mw-r mw-num' }, fmtPrice(r.priceOutM))))))
-          : h('p', { className: 'mw-empty' }, `近 ${showDays} 天没有新上模型`),
-        h('p', { className: 'mw-note' }, '口径：官方清单 API 的 created 时间戳，含 :batch 等变体行'));
+          : h('p', { className: 'mw-empty' }, `近 ${showDays} 天没有新上模型`));
     }
 
-    function TopCard({ snap }) {
-      const rows = snap?.top?.rows ?? [];
-      const rk = snap?.sources?.rankings;
+    /** 榜单卡：周榜与免费榜共用一张表 —— 同字段、同降级口径；各自挂各自的源闸门（srcKey）。 */
+    function TopCard({ snap, board = 'top', title = '热门周榜', empty = '还没有成功解析过周榜数据', srcKey = 'rankings' }) {
+      const rows = snap?.[board]?.rows ?? [];
+      const rk = snap?.sources?.[srcKey];
       const stale = rk && !rk.ok && rows.length > 0;
       // 量级条按榜首归一：一眼看出第 1 名和第 15 名差多少（纯文本列看不出来）
       const maxTok = rows.reduce((m, r) => Math.max(m, Number(r.tokens) || 0), 0) || 1;
       return h('section', { className: 'mw-card' },
         h('div', { className: 'mw-card-h' },
-          h('span', { className: 'mw-card-t' }, '热门周榜'),
+          h('span', { className: 'mw-card-t' }, title),
           h('span', { className: 'mw-card-n mw-num' }, `${rows.length} 条`)),
         stale
           ? h('div', { className: 'mw-card-b' },
@@ -535,9 +534,8 @@ window.__ModuleLoader__.load({
                     h('i', { style: { width: `${pct}%` } }))),
                   h('td', { className: `mw-r mw-num ${dd.cls}` }, dd.text));
               })))
-          : h('p', { className: 'mw-empty' }, '还没有成功解析过周榜数据'),
-        h('p', { className: 'mw-note' },
-          `${snap?.top?.note || '来源文案未就位'} · 名次差按上一轮周榜计算，「新见」= 上轮不在榜或首轮无对比`));
+          : h('p', { className: 'mw-empty' }, empty),
+        h('p', { className: 'mw-note' }, snap?.[board]?.note || '来源文案未就位'));
     }
 
     function EventsCard({ snap }) {
@@ -556,7 +554,7 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'mw-ago mw-num' }, fmtAge(e.at, snap?.at))))))
           : h('p', { className: 'mw-empty' }, snap && snap.storage && !snap.storage.available
               ? '存储不可用，变化不会留痕'
-              : '还没有记录：第一轮检查只建档，之后每次变化都会落在这里'));
+              : '还没有记录'));
     }
 
     /** 设置页：可改的三项 + 只读的运行环境（能力表来自宿主快照，不自己编）。 */
@@ -659,6 +657,7 @@ window.__ModuleLoader__.load({
       const showDays = cfg().showDays || 7;
       let panel;
       if (tab === 'top') panel = h(TopCard, { snap });
+      else if (tab === 'free') panel = h(TopCard, { snap, board: 'free', title: '免费榜单', empty: '免费榜源还没有成功返回过模型', srcKey: 'free' });
       else if (tab === 'new') panel = h(NewModelsCard, { snap, showDays });
       else if (tab === 'events') panel = h(EventsCard, { snap });
       else if (tab === 'settings') panel = h(SettingsBar, { snap, saving, savedNote, onInterval: (v) => savePrefs({ intervalMin: v }), onSave: (p) => savePrefs(p) });
@@ -667,9 +666,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'mw-root' },
         h(Header, { snap, conn, checking, lastErr, onCheck: doCheck }),
         h(TabBar, { tab, onTab: setTab, snap }),
-        h('div', { className: 'mw-panel' }, panel),
-        h('p', { className: 'mw-disclaimer' },
-          '本插件不发起任何对话、不代理请求、不推送外部通知；唯一出网动作是每轮检查对 openrouter.ai 的两次只读 GET。'));
+        h('div', { className: 'mw-panel' }, panel));
     }
 
     // ------------------------------------------------------------

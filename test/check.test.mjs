@@ -45,10 +45,16 @@ const rankOk = (slugs) => ({
   view: 'week',
   rows: slugs.map((slug, k) => ({ slug, tokens: 1000 - k })),
 });
+// v1.8：免费榜是独立源，走自己的 fetchFn（rows 已由宿主排好序）
+const freeOk = (slugs) => ({
+  ok: true,
+  rows: slugs.map((slug, k) => ({ slug, tokens: 500 - k })),
+});
 const modelsBad = (error) => ({ ok: false, error });
 const rankBad = (reason) => ({ ok: false, reason });
+const freeBad = (reason) => ({ ok: false, reason });
 
-function makeCheck({ stores, m, r, getIntervalFn, nowStart = 1790700000000, onEvent = null, logger = null }) {
+function makeCheck({ stores, m, r, f, getIntervalFn, nowStart = 1790700000000, onEvent = null, logger = null }) {
   let t = nowStart;
   return createCheckService({
     getPrefs: () => PREFS,
@@ -59,6 +65,7 @@ function makeCheck({ stores, m, r, getIntervalFn, nowStart = 1790700000000, onEv
     getIntervalFn: getIntervalFn ?? (() => undefined),
     fetchModelsFn: scripter(m ?? [modelsOk(['a/x'])]),
     fetchRankingsFn: scripter(r ?? [rankOk(['a/x'])]),
+    fetchFreeRankingsFn: scripter(f ?? [freeOk([])]),
     onEvent,
   });
 }
@@ -198,12 +205,15 @@ check('check-09 busy 单闸：跑中再触发抛 CHECK_BUSY，结束后闸重新
     getIntervalFn: () => undefined,
     fetchModelsFn: async () => { await gate; return modelsOk(['a']); },
     fetchRankingsFn: async () => rankOk(['a']),
+    fetchFreeRankingsFn: async () => freeOk([]),
   });
   const p = svc.run();
   assert.equal(svc.running, true);
   // 必须是 rejected promise 而不是同步 throw：定时器回调接不住同步异常，会打崩宿主。
-  await assert.rejects(() => svc.run(), (e) => e.code === 'CHECK_BUSY');
+  const second = svc.run();
+  // 先放闸再收尾断言：闸要是被变异摘掉，第二轮会等 gate 等到天荒地老（互等死锁，套件连 FAIL 都吐不出）。
   release();
+  await assert.rejects(second, (e) => e.code === 'CHECK_BUSY');
   await p;
   assert.equal(svc.running, false);
   await svc.run(); // 闸放开
@@ -297,6 +307,90 @@ check('check-17 榜单坏转好：只记 source_recover，不补产积压进/出
   assert.ok(kinds.includes('source_recover'), `恢复必须记一条：${kinds.join(',')}`);
   assert.ok(!kinds.includes('top_enter') && !kinds.includes('top_exit') && !kinds.includes('top_move'),
     `坏转好那轮不许补产积压账：${kinds.join(',')}`);
+});
+
+check('check-18 免费榜 delta 独立成榜：名次按免费榜自己的行排，且不产任何流水事件', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a/x']), modelsOk(['a/x'])],
+    r: [rankOk(['a/x']), rankOk(['a/x'])],
+    f: [freeOk(['f/p:free', 'f/q:free']), freeOk(['f/q:free', 'f/p:free'])] });
+  await svc.run();
+  const first = stores.getState().freeTop;
+  assert.deepEqual(first.map((r) => `${r.rank}:${r.slug}`), ['1:f/p:free', '2:f/q:free'], '首轮名次按行顺序');
+  assert.ok(first.every((r) => !('delta' in r)), '首轮无对比基准不许带 delta');
+  stores.events.length = 0;
+  await svc.run();
+  const st = stores.getState();
+  assert.equal(st.freeTop[0].slug, 'f/q:free');
+  assert.equal(st.freeTop[0].delta, 1, 'f/q 从 2→1：升为正');
+  assert.equal(st.freeTop[1].delta, -1, 'f/p 从 1→2：降为负');
+  assert.deepEqual(st.prevFreeTop, ['f/p:free', 'f/q:free']);
+  assert.equal(stores.events.length, 0, '免费榜进出/挪位都不进流水（周榜独享事件口径）');
+});
+
+check('check-19 免费榜坏轮：freeTop 与 prevFreeTop 冻结在最后一次成功轮，不被清空', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a']), modelsOk(['a']), modelsOk(['a'])],
+    r: [rankOk(['a']), rankOk(['a', 'b']), rankOk(['a', 'b'])],
+    f: [freeOk(['f/p:free']), freeBad('免费榜源返回 503'), freeBad('免费榜源仍坏')] });
+  await svc.run(); // 成功轮：freeTop=[f/p], prevFreeTop=[]（首轮无上一榜）
+  await svc.run(); // 免费榜坏：冻结；周榜侧照常更新（b 进榜记 top_enter）
+  await svc.run(); // 连坏：仍然冻结，不许逐轮自我清空
+  const st = stores.getState();
+  assert.equal(st.rankOk, true, '周榜侧不受免费榜坏的影响');
+  assert.equal(st.freeOk, false);
+  assert.match(st.freeError, /仍坏/, 'freeError 记的是最新一轮的原因');
+  assert.deepEqual(st.freeTop.map((r) => r.slug), ['f/p:free'], '坏轮快照里免费榜仍显示上次成功数据');
+  assert.deepEqual(st.prevFreeTop, [], 'prevFreeTop 冻结在最后一次成功轮');
+  assert.deepEqual(st.top.map((r) => r.slug), ['a', 'b']);
+  const kinds = stores.events.map((e) => `${e.kind}`);
+  assert.equal(kinds.filter((k) => k === 'source_error').length, 1, '免费榜连坏两轮只记一笔');
+});
+
+check('check-20 三源独立：周榜坏不拦免费榜，免费榜翻转各记各的账', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a']), modelsOk(['a']), modelsOk(['a'])],
+    r: [rankOk(['a']), rankBad('页面结构变化'), rankOk(['a'])],
+    f: [freeOk(['f/x:free']), freeOk(['f/x:free', 'f/y:free']), freeOk(['f/x:free', 'f/y:free'])] });
+  await svc.run(); // baseline
+  stores.events.length = 0;
+  const r2 = await svc.run(); // 周榜坏、免费榜好
+  assert.equal(r2.rankOk, false);
+  assert.equal(r2.freeOk, true);
+  const st2 = stores.getState();
+  assert.deepEqual(st2.freeTop.map((r) => r.slug), ['f/x:free', 'f/y:free'], '免费榜照常推进');
+  assert.deepEqual(st2.prevFreeTop, ['f/x:free']);
+  const kinds2 = stores.events.map((e) => e.kind);
+  assert.ok(kinds2.includes('source_error'), '周榜坏记一笔');
+  assert.ok(!kinds2.some((k) => k === 'source_recover'), '免费榜没坏过不该记恢复');
+  stores.events.length = 0;
+  await svc.run(); // 周榜恢复
+  const kinds3 = stores.events.map((e) => e.kind);
+  assert.ok(kinds3.includes('source_recover'), '周榜坏转好记恢复');
+  assert.equal(kinds3.filter((k) => k === 'source_error').length, 0, '免费榜持续好，不该冒出错误账');
+});
+
+check('check-21 免费榜坏转好：只记 source_recover，不补产积压 delta；恢复轮名次重排不带私账', async () => {
+  const stores = memStores();
+  const svc = makeCheck({ stores,
+    m: [modelsOk(['a']), modelsOk(['a']), modelsOk(['a'])],
+    r: [rankOk(['a']), rankOk(['a']), rankOk(['a'])],
+    f: [freeOk(['f/x:free', 'f/y:free']), freeBad('免费榜源返回 503'), freeOk(['f/y:free', 'f/x:free'])] });
+  await svc.run(); // 首轮：freeTop=[x,y]，freeOk=true
+  stores.events.length = 0;
+  await svc.run(); // 坏轮：source_error 一笔，freeTop 冻结
+  assert.equal(stores.events.filter((e) => e.kind === 'source_error').length, 1);
+  stores.events.length = 0;
+  await svc.run(); // 好转好：y/x 顺序反了，但不许补产 delta（上轮不公允）
+  const st = stores.getState();
+  assert.deepEqual(st.freeTop.map((r) => r.slug), ['f/y:free', 'f/x:free']);
+  assert.ok(st.freeTop.every((r) => !('delta' in r)), '坏转好那轮拿不到公允上轮，名次重排也不记账');
+  const kinds = stores.events.map((e) => `${e.kind}:${e.detail}`);
+  assert.ok(kinds.some((k) => k.includes('免费周榜源恢复')), kinds.join(','));
+  assert.equal(kinds.filter((k) => k.startsWith('source_error')).length, 0);
 });
 
 await runAll('check');

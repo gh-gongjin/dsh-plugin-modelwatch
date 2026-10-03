@@ -12,7 +12,7 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
 
 /* ============================================================
    spec 页 = client.js 的同构复刻（结构/类名/断点必须一一对应）
-   v1.3 结构：Header → TabBar(5) → Panel(overview/top/new/events/settings) → disclaimer
+   v1.8 结构：Header → TabBar(6) → Panel(overview/top/free/new/events/settings)
    ⛔ 不要给 .mw-root 加 container-type：inline 轴 size containment 会让宽度不再由内容撑开，
       宿主主区是 flex 时 .mw-root 直接算成 0 宽 ⇒ 整页塌成"每张卡一条竖线"。断点只用 @media。
    ⛔ 根容器必须 box-sizing:border-box（宿主无通配 box-sizing，`.mw-root *` 盖不到根自己）。
@@ -171,7 +171,6 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
 .mw-count{min-width:34px;text-align:center;font-weight:600}
 .mw-saved{color:var(--mw-ok);font-size:12px}
 
-.mw-disclaimer{margin:2px 0 0;color:var(--mw-faint);font-size:11px;line-height:1.6}
 </style>
 </head>
 <body>
@@ -181,10 +180,9 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
   <header class="mw-head">
     <div class="mw-head-l">
       <span class="mw-title">模型监控</span>
-      <span class="mw-sub">OpenRouter 新上模型与热门周榜 · 全程只读 GET</span>
     </div>
     <div class="mw-head-r">
-      <span class="mw-pill" title="热门周榜：页面结构变化：没找到 flight 数据段"><i class="mw-dot mw-dot-err"></i>榜单源故障</span>
+      <span class="mw-pill" title="热门周榜：页面结构变化：没找到 flight 数据段"><i class="mw-dot mw-dot-err"></i>周榜源故障</span>
       <span class="mw-sub mw-num">检查于 5 分钟前 · 模型总数 462</span>
       <button class="mw-btn mw-btn-main">立即检查</button>
     </div>
@@ -194,6 +192,7 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
   <nav class="mw-tabs">
     <button class="mw-tab on" data-tab="overview">总览</button>
     <button class="mw-tab" data-tab="top">热门周榜<span class="mw-tab-n mw-num">15</span></button>
+    <button class="mw-tab" data-tab="free">免费榜单<span class="mw-tab-n mw-num">15</span></button>
     <button class="mw-tab" data-tab="new">新上模型<span class="mw-tab-n mw-num">6</span></button>
     <button class="mw-tab" data-tab="events">变化记录<span class="mw-tab-n mw-num">6</span></button>
     <button class="mw-tab" data-tab="settings">设置</button>
@@ -206,11 +205,11 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
     <section class="mw-card">
       <div class="mw-card-h">
         <span class="mw-card-t">数据源状态</span>
-        <span class="mw-card-n mw-num">检查于 5 分钟前 · 模型总数 462</span>
       </div>
       <div class="mw-card-b">
         <div class="mw-srcrow"><i class="mw-dot mw-dot-ok"></i><b>官方清单 API</b><span class="mw-sub mw-num">在位 · 上次成功 刚刚</span></div>
         <div class="mw-srcrow"><i class="mw-dot mw-dot-err"></i><b>热门周榜（非官方源）</b><span class="mw-sub" title="页面结构变化：没找到 flight 数据段">故障 · 页面结构变化：没找到 flight 数据段</span></div>
+        <div class="mw-srcrow"><i class="mw-dot mw-dot-ok"></i><b>免费榜单（非官方源）</b><span class="mw-sub mw-num">在位 · 上次成功 刚刚</span></div>
       </div>
     </section>
 
@@ -304,10 +303,38 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
           <tr><td class="mw-r"><span class="mw-rank mw-rank-n">15</span></td><td class="mw-name" title="upstage/solar-pro4">upstage/solar-pro4</td><td class="mw-r mw-num">1.36T</td><td><div class="mw-bar mw-bar-n"><i style="width:5%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
         </tbody>
       </table>
-      <p class="mw-note">来源：榜单页内嵌数据（非官方接口），页面改版会失效 · 名次差按上一轮周榜计算，「新见」= 上轮不在榜或首轮无对比</p>
+      <p class="mw-note">来源：榜单页内嵌数据（非官方接口），页面改版会失效</p>
     </section>
   </div>
 
+  <!-- ================= 免费榜单（v1.8 独立源：榜单前端 API，取前 15 行） ================= -->
+  <div class="mw-panel" id="p-free" hidden>
+    <section class="mw-card">
+      <div class="mw-card-h"><span class="mw-card-t">免费榜单</span><span class="mw-card-n mw-num">15 条</span></div>
+      <table class="mw-tbl">
+        <colgroup><col style="width:46px"><col><col style="width:84px"><col style="width:92px"><col style="width:76px"></colgroup>
+        <thead><tr><th>#</th><th>模型</th><th class="mw-r">周 token</th><th>量级</th><th class="mw-r">较上轮</th></tr></thead>
+        <tbody>
+          <tr class="mw-tr-medal"><td class="mw-r"><span class="mw-rank mw-rank-1" title="第 1 名">1</span></td><td class="mw-name" title="nvidia/nemotron-3-ultra-550b-a55b-20260604:free">nvidia/nemotron-3-ultra-550b-a55b-20260604:free</td><td class="mw-r mw-num">5.99T</td><td><div class="mw-bar mw-bar-1"><i style="width:100%"></i></div></td><td class="mw-r mw-num mw-up">▲1</td></tr>
+          <tr class="mw-tr-medal"><td class="mw-r"><span class="mw-rank mw-rank-2" title="第 2 名">2</span></td><td class="mw-name" title="poolside/laguna-s-2.1-20260720:free">poolside/laguna-s-2.1-20260720:free</td><td class="mw-r mw-num">970B</td><td><div class="mw-bar mw-bar-2"><i style="width:16%"></i></div></td><td class="mw-r mw-num mw-down">▼1</td></tr>
+          <tr class="mw-tr-medal"><td class="mw-r"><span class="mw-rank mw-rank-3" title="第 3 名">3</span></td><td class="mw-name" title="nvidia/nemotron-3.5-lightning-20260807:free">nvidia/nemotron-3.5-lightning-20260807:free</td><td class="mw-r mw-num">522B</td><td><div class="mw-bar mw-bar-3"><i style="width:9%"></i></div></td><td class="mw-r mw-num mw-up">▲1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 4 名">4</span></td><td class="mw-name" title="dots-studio/dots-3-note-preview-20260813:free">dots-studio/dots-3-note-preview-20260813:free</td><td class="mw-r mw-num">471B</td><td><div class="mw-bar mw-bar-n"><i style="width:8%"></i></div></td><td class="mw-r mw-num mw-down">▼1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 5 名">5</span></td><td class="mw-name" title="inclusionai/ling-3.0-flash-fin-20260827:free">inclusionai/ling-3.0-flash-fin-20260827:free</td><td class="mw-r mw-num">448B</td><td><div class="mw-bar mw-bar-n"><i style="width:7%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 6 名">6</span></td><td class="mw-name" title="inclusionai/ling-3.0-flash-sante-20260904:free">inclusionai/ling-3.0-flash-sante-20260904:free</td><td class="mw-r mw-num">379B</td><td><div class="mw-bar mw-bar-n"><i style="width:6%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 7 名">7</span></td><td class="mw-name" title="nvidia/nemotron-3-super-120b-a12b-20230311:free">nvidia/nemotron-3-super-120b-a12b-20230311:free</td><td class="mw-r mw-num">357B</td><td><div class="mw-bar mw-bar-n"><i style="width:6%"></i></div></td><td class="mw-r mw-num mw-up">▲1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 8 名">8</span></td><td class="mw-name" title="thinkingmachines/inkling-20260715:free">thinkingmachines/inkling-20260715:free</td><td class="mw-r mw-num">238B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-down">▼1</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 9 名">9</span></td><td class="mw-name" title="cohere/north-mini-code-20260617:free">cohere/north-mini-code-20260617:free</td><td class="mw-r mw-num">117B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 10 名">10</span></td><td class="mw-name" title="thinkingmachines/inkling-small-20260730:free">thinkingmachines/inkling-small-20260730:free</td><td class="mw-r mw-num">104B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 11 名">11</span></td><td class="mw-name" title="poolside/laguna-xs-2.1-20260625:free">poolside/laguna-xs-2.1-20260625:free</td><td class="mw-r mw-num">83.0B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 12 名">12</span></td><td class="mw-name" title="qwen/qwen3.8-27b-20260814:free">qwen/qwen3.8-27b-20260814:free</td><td class="mw-r mw-num">80.7B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 13 名">13</span></td><td class="mw-name" title="apodex/apodex-1.1-mini-20261001:free">apodex/apodex-1.1-mini-20261001:free</td><td class="mw-r mw-num">28.0B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 14 名">14</span></td><td class="mw-name" title="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-20260428:free">nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-20260428:free</td><td class="mw-r mw-num">25.3B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">新见</td></tr>
+          <tr><td class="mw-r"><span class="mw-rank mw-rank-n" title="第 15 名">15</span></td><td class="mw-name" title="liquid/lfm-2.5-2.6b-20260811:free">liquid/lfm-2.5-2.6b-20260811:free</td><td class="mw-r mw-num">18.4B</td><td><div class="mw-bar mw-bar-n"><i style="width:4%"></i></div></td><td class="mw-r mw-num mw-flat">—</td></tr>
+        </tbody>
+      </table>
+      <p class="mw-note">来源：榜单前端 API（非官方接口），按免费变体模型的周 token 总量排序，接口变化会失效</p>
+    </section>
+  </div>
   <!-- ================= 新上模型 ================= -->
   <div class="mw-panel" id="p-new" hidden>
     <section class="mw-card">
@@ -324,7 +351,6 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
           <tr><td><span class="mw-name" title="perceptron/perceptron-mk1.5">Perceptron: Perceptron Mk1.5</span><span class="mw-slug">perceptron/perceptron-mk1.5</span></td><td class="mw-r mw-num">2026-09-26</td><td class="mw-r mw-num">37K</td><td class="mw-r mw-num">$0.15</td><td class="mw-r mw-num">$1.50</td></tr>
         </tbody>
       </table>
-      <p class="mw-note">口径：官方清单 API 的 created 时间戳，含 :batch 等变体行</p>
     </section>
   </div>
 
@@ -384,13 +410,12 @@ body{background:#fafafa;font-family:-apple-system,"Segoe UI","PingFang SC","Micr
     </section>
   </div>
 
-  <p class="mw-disclaimer">本插件不发起任何对话、不代理请求、不推送外部通知；唯一出网动作是每轮检查对 openrouter.ai 的两次只读 GET。</p>
 </div>
 
 <script>
 (function () {
   var tabs = Array.prototype.slice.call(document.querySelectorAll('.mw-tab'));
-  var IDS = ['overview', 'top', 'new', 'events', 'settings'];
+  var IDS = ['overview', 'top', 'free', 'new', 'events', 'settings'];
 
   function show(id) {
     if (IDS.indexOf(id) < 0) id = 'overview';

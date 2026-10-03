@@ -2,8 +2,10 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { check, runAll, assert } from './_helpers.mjs';
 
-/** 在沙箱里求值 client.js，返回其 __test 出口与 apply；每次调用都是干净的 moduleLoader。 */
-function loadClient(payload = {}) {
+/** 在沙箱里求值 client.js，返回其 __test 出口与 apply；每次调用都是干净的 moduleLoader。
+ *  opts.tab / opts.snap：把 ModelwatchPage 的页签初始值与快照初始值顶成指定值
+ *  （useState('overview') / useState(null) 各只有一处，用来越过 effect 直接测 tab→组件路由）。 */
+function loadClient(payload = {}, opts = {}) {
   const code = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8');
   const loaded = {};
   const fakeDoc = {
@@ -13,7 +15,11 @@ function loadClient(payload = {}) {
   };
   const fakeReact = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }),
-    useState: (init) => [init, () => {}],
+    useState: (init) => {
+      const v = (opts.snap !== undefined && init === null) ? opts.snap
+        : (opts.tab && init === 'overview' ? opts.tab : init);
+      return [v, () => {}];
+    },
     useEffect: () => {},
     useRef: () => ({ current: null }),
   };
@@ -46,9 +52,11 @@ const SNAPSHOT = {
   sources: {
     models: { ok: true, error: undefined, checkedAt: 1790690000000, unofficial: undefined },
     rankings: { ok: false, error: '页面结构变化：没找到 flight 数据段', checkedAt: 1790690000000, unofficial: true, note: '来源：榜单页内嵌数据（非官方接口），页面改版会失效' },
+    free: { ok: true, error: undefined, checkedAt: 1790690000000, unofficial: true, note: '免榜来源注' },
   },
   models: { count: 3, firstRun: false, newThisWeek: [{ id: 'a/x', name: 'A X', created: 1790699600, contextLength: 128000, priceInM: 3, priceOutM: 15 }] },
   top: { rows: [{ rank: 1, slug: 'p/m', tokens: 1.2e10 }, { rank: 2, slug: 'p/m2', tokens: 98000000 }], days: 7, note: '来源注' },
+  free: { rows: [{ rank: 1, slug: 'p/m3:free', tokens: 5e6, delta: 2 }], days: 7, note: '免榜来源注' },
   events: [{ id: 'e1', at: 1790699000000, kind: 'new_model', slug: 'a/x', detail: 'A X' }],
 };
 
@@ -63,6 +71,20 @@ function texts(node, acc = []) {
 function renderTree(el, props) {
   const out = el(props);
   return out;
+}
+
+/** fake react 只记 h(组件, props)，不会调用组件 —— 路由类断言要先递归展开函数组件。 */
+function mount(node, depth = 0) {
+  if (Array.isArray(node)) return node.map((n) => mount(n, depth));
+  if (!node || typeof node !== 'object') return node;
+  const kids = () => (node.children || []).map((c) => mount(c, depth + 1));
+  if (typeof node.type === 'function' && depth < 16) {
+    return mount(node.type({ ...(node.props || {}), children: kids() }), depth + 1);
+  }
+  return { ...node, children: kids() };
+}
+function renderPage(el, props = {}) {
+  return mount(el(props));
 }
 
 /** 按 className 找节点（className 可能是 '' / 空格分隔多类）。 */
@@ -170,6 +192,7 @@ check('client-10 状态卡：存储不可用横幅 + 源行「在位/故障」+ 
   assert.match(t, /在位/);
   assert.match(t, /故障/);
   assert.match(t, /flight/, '榜单坏因要原样念出来');
+  assert.match(t, /免费榜单（非官方源）/, 'v1.8 免费榜独立源必须在状态卡有自己的一行');
   const noStore = { ...SNAPSHOT, storage: { available: false } };
   const t2 = texts(renderTree(exports.__test.components.StatusCard, { snap: noStore, conn: { ok: true, note: '' }, checking: false, lastErr: '', onCheck() {} })).join('|');
   assert.match(t2, /无法留痕/);
@@ -311,17 +334,18 @@ check('client-20 版式契约：主从栅格不做等高拉伸 / 状态压成横
     'client.js 也要有「计数+链接」贴靠规则（原型已定，两处不许漂）');
 });
 
-check('client-21 页签与徽标：5 个页签 / 前三名金银铜 / 每个偏好字段都有入口', () => {
+check('client-21 页签与徽标：6 个页签 / 前三名金银铜 / 每个偏好字段都有入口', () => {
   const { exports } = loadClient(PAYLOAD);
   const T = exports.__test.TABS;
-  assert.equal(T.length, 5, '页签数应为 5');
+  assert.equal(T.length, 6, '页签数应为 6');
   // vm 里造的数组跨 realm 比不了原型，按 JSON 形状断言（同 client-07）
-  assert.equal(JSON.stringify(T.map((t) => t.id)), JSON.stringify(['overview', 'top', 'new', 'events', 'settings']));
+  assert.equal(JSON.stringify(T.map((t) => t.id)), JSON.stringify(['overview', 'top', 'free', 'new', 'events', 'settings']));
   const bar = texts(renderTree(exports.__test.components.TabBar, { tab: 'top', onTab() {}, snap: SNAPSHOT })).join('|');
-  for (const l of ['总览', '热门周榜', '新上模型', '变化记录', '设置']) {
+  for (const l of ['总览', '热门周榜', '免费榜单', '新上模型', '变化记录', '设置']) {
     assert.ok(bar.includes(l), `页签栏缺「${l}」`);
   }
   assert.match(bar, /热门周榜\|2/, '页签计数要跟着数据走（fixture 周榜 2 行）');
+  assert.match(bar, /免费榜单\|1/, '免费榜计数同样跟着数据走（fixture 免榜 1 行）');
 
   // 徽标：前三名走金/银/铜，第 4 名起回落中性
   const rb = exports.__test.components.RankBadge;
@@ -341,15 +365,80 @@ check('client-21 页签与徽标：5 个页签 / 前三名金银铜 / 每个偏�
 
   // 原型页签必须与 TABS 逐一对齐（缺一个 = 原型又落后于实现）
   const proto = fs.readFileSync(new URL('../prototype/index.html', import.meta.url), 'utf8');
-  for (const id of ['overview', 'top', 'new', 'events', 'settings']) {
+  for (const id of ['overview', 'top', 'free', 'new', 'events', 'settings']) {
     assert.ok(proto.includes(`data-tab="${id}"`), `原型缺页签按钮 ${id}`);
   }
   assert.match(proto, /id="p-overview"/, '原型缺总览面板容器');
-  for (const id of ['top', 'new', 'events', 'settings']) {
+  for (const id of ['top', 'free', 'new', 'events', 'settings']) {
     assert.ok(proto.includes(`id="p-${id}"`), `原型缺面板容器 p-${id}`);
   }
   // 原型设置页的选中档 = 出厂默认（默认值改了一个地方没跟上，这里会红）
   assert.match(proto, /class="on">\s*1 小时/, '原型设置页默认选中档必须与 DEFAULT_PREFS.intervalMin 一致');
+});
+
+check('client-22 免费榜单卡：独立源独立闸门；来源文案吃宿主 note，不自编', () => {
+  const { exports } = loadClient(PAYLOAD);
+  const TC = exports.__test.components.TopCard;
+  const freeProps = { board: 'free', title: '免费榜单', empty: '免费榜源还没有成功返回过模型', srcKey: 'free' };
+  // SNAPSHOT：周榜源坏、免费榜源好 ⇒ 免费榜卡不许挂横幅（v1.8 起两榜各挂各的闸）
+  const t = texts(renderTree(TC, { snap: SNAPSHOT, ...freeProps })).join('|');
+  assert.ok(t.includes('免费榜单'), '卡题走参数，不写死热门周榜');
+  assert.ok(t.includes('p/m3:free'), '免费行 slug 带 :free 后缀原样渲染');
+  assert.ok(!t.includes('本轮榜单源故障'), '周榜源坏不连坐免费榜：闸门必须各挂各的');
+  assert.ok(t.includes('免榜来源注'), '来源注来自快照 free.note（宿主单点）');
+  assert.ok(!t.includes('来源：榜单前端 API'), 'client 不许内置宿主文案');
+  assert.match(t, /▲2/, 'delta 走与周榜同一套渲染（▲/▼/新见）');
+
+  // 免费榜源自己坏：横幅就地标注，且念的是免费榜源的原因
+  const freeBad = { ...SNAPSHOT, sources: { ...SNAPSHOT.sources, free: { ok: false, error: '免费榜源返回 503', checkedAt: 1790690000000, unofficial: true, note: 'n' } } };
+  const t1 = texts(renderTree(TC, { snap: freeBad, ...freeProps })).join('|');
+  assert.ok(t1.includes('本轮榜单源故障') && t1.includes('503'), '免费榜坏轮要说明是上次数据');
+  const okTop = texts(renderTree(TC, { snap: freeBad })).join('|');
+  assert.ok(!okTop.includes('503'), '免费榜源坏也不该在周榜卡上冒 503（反向不连坐）');
+
+  const emptySnap = { ...SNAPSHOT, free: { rows: [], days: 7, note: 'n' } };
+  const t3 = texts(renderTree(TC, { snap: emptySnap, ...freeProps })).join('|');
+  assert.ok(t3.includes('免费榜源还没有成功返回过模型'), '空态要说实话而不是空白');
+});
+
+check('client-24 tab 路由：两个榜各挂各的源闸门，srcKey 由路由传下去', () => {
+  const render = (tab, snap) => texts(renderPage(loadClient(PAYLOAD, { tab, snap }).exports.__test.components.ModelwatchPage)).join('|');
+  // 周榜源坏、免费榜源好：免费榜页不许出横幅（路由漏传 srcKey 就会串到周榜闸门上）
+  const free = render('free', SNAPSHOT);
+  assert.ok(free.includes('p/m3:free'), 'tab=free 渲染的是免费榜行');
+  assert.ok(!free.includes('本轮榜单源故障'), '免费榜页不许挂周榜源的故障横幅');
+  // 反向：周榜页必须挂上自己那口锅
+  const top = render('top', SNAPSHOT);
+  assert.ok(top.includes('本轮榜单源故障') && top.includes('flight'), 'tab=top 显示的是周榜源故障与原因');
+  assert.ok(!top.includes('p/m3:free'), 'tab=top 不许渲染免费榜行');
+  // 免费榜自己坏：横幅在免费榜页出现，原因念的是免费榜源的
+  const freeBad = { ...SNAPSHOT, sources: { ...SNAPSHOT.sources, rankings: { ...SNAPSHOT.sources.rankings, ok: true }, free: { ok: false, error: '免费榜源返回 503', checkedAt: 1, unofficial: true, note: 'n' } } };
+  const f2 = render('free', freeBad);
+  assert.ok(f2.includes('本轮榜单源故障') && f2.includes('503'), '免费榜坏轮要在自己页上如实标注');
+});
+
+check('client-23 页头信号：三源名册含免费榜源，坏/缺都能落到 pill 文案与 tooltip', () => {
+  const { exports } = loadClient(PAYLOAD);
+  const allOk = { ...SNAPSHOT, sources: { ...SNAPSHOT.sources, rankings: { ...SNAPSHOT.sources.rankings, ok: true } } };
+  const pill = (snap) => {
+    const tree = renderTree(exports.__test.components.Header, { snap, conn: { ok: true, note: '' }, checking: false, lastErr: '', onCheck() {} });
+    const node = findByClass(tree, 'mw-pill')[0];
+    return { text: texts(node).join(''), cls: node.children[0].props.className, tip: node.props.title || '' };
+  };
+  let p = pill(allOk);
+  assert.match(p.text, /数据源全部在位/);
+  assert.match(p.cls, /mw-dot-ok/);
+  // 只有免费榜源坏：页头必须点名「免费榜源」，不能含糊成「周榜源」或漏报
+  const freeOnly = { ...allOk, sources: { ...allOk.sources, free: { ok: false, error: '免费榜源返回 503', checkedAt: 1, unofficial: true, note: 'n' } } };
+  p = pill(freeOnly);
+  assert.match(p.text, /免费榜源故障/);
+  assert.match(p.cls, /mw-dot-err/);
+  assert.match(p.tip, /免费榜源：免费榜源返回 503/, '坏因要在 tooltip 里');
+  // 免费榜源整体缺席（旧档快照）：不能假装全在位
+  const { free: _gone, ...noFree } = allOk.sources;
+  p = pill({ ...allOk, sources: noFree });
+  assert.match(p.text, /部分源未就位/);
+  assert.match(p.cls, /mw-dot-warn/);
 });
 
 await runAll('client');

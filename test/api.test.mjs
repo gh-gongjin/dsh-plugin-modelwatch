@@ -15,7 +15,8 @@ function depsStub(extra = {}) {
       { id: 'b/y', name: 'B Y', created: 1750000000 },
     ],
     top: Array.from({ length: 20 }, (_, i) => ({ rank: i + 1, slug: `s${i}/m`, tokens: (20 - i) * 1e9 })),
-    prevTop: [], baseline: false, modelsOk: true, rankOk: true,
+    freeTop: Array.from({ length: 3 }, (_, i) => ({ rank: i + 1, slug: `s${i}/m:free`, tokens: (3 - i) * 1e8 })),
+    prevTop: [], baseline: false, modelsOk: true, rankOk: true, freeOk: true,
   };
   return {
     caps,
@@ -43,12 +44,14 @@ check('api-01 GET /api/snapshot 全量形状（spec §8 字段表逐项在场）
   const body = res.json();
   assert.equal(body.ok, true);
   const d = body.data;
-  for (const k of ['at', 'caps', 'capabilityRows', 'prefs', 'storage', 'sources', 'models', 'top', 'events']) {
+  for (const k of ['at', 'caps', 'capabilityRows', 'prefs', 'storage', 'sources', 'models', 'top', 'free', 'events']) {
     assert.ok(k in d, `快照缺字段 ${k}`);
   }
   assert.equal(d.models.count, 3);
   assert.equal(d.top.rows.length, 15, 'top 按 prefs.topN 截取');
   assert.equal(d.sources.rankings.unofficial, true, '非官方标注必须随快照出门');
+  assert.equal(d.sources.free.unofficial, true, '免费榜也是非官方源，标注随行');
+  assert.equal(d.sources.free.ok, true);
 });
 
 check('api-02 快照的 newThisWeek 由宿主现算（7 天窗），界面拿不到判定口径', async () => {
@@ -230,9 +233,25 @@ check('api-20 update 帧载荷 = GET snapshot 同形全量（浏览器合并时�
   const frame = res.writes.find((w) => w.startsWith('event: update\ndata: '));
   assert.ok(frame, 'update 帧要广播到在连的 SSE');
   const data = JSON.parse(frame.slice('event: update\ndata: '.length).trim());
-  for (const k of ['at', 'caps', 'capabilityRows', 'prefs', 'storage', 'sources', 'models', 'top', 'events']) {
+  for (const k of ['at', 'caps', 'capabilityRows', 'prefs', 'storage', 'sources', 'models', 'top', 'free', 'events']) {
     assert.ok(k in data, `update 帧缺快照字段 ${k}：界面合并时就得替宿主编数据`);
   }
+});
+
+check('api-21 快照 free：行按 prefs.topN 切片、来源注吃宿主单点文案、旧档无 freeTop 时给空数组', async () => {
+  const snap = await snapshotOf(depsStub());
+  assert.equal(snap.free.rows.length, 3);
+  assert.match(snap.free.note, /非官方/);
+  assert.match(snap.free.note, /免费/);
+  assert.equal(snap.sources.free.note, snap.free.note, '来源注单点：源行与榜面必须同一句');
+  const narrow = await snapshotOf(depsStub({ prefsStore: { available: true, read: async () => ({ intervalMin: 60, topN: 2, keepEvents: 500 }) } }));
+  assert.equal(narrow.free.rows.length, 2, '免费榜同受「榜单条数」偏好约束');
+  const legacy = await snapshotOf(depsStub({
+    stateStore: { available: true, read: async () => ({ at: 1, modelCount: 1, modelIds: ['a/x'], newRecent: [], top: [], prevTop: [], modelsOk: true, rankOk: true }) },
+  }));
+  assert.deepEqual(legacy.free.rows, [], '免费榜上线前的旧档：读得出、free 给空数组而不是缺字段');
+  assert.equal(legacy.sources.free.ok, false, '旧档没有 freeOk：如实说没跑过，不冒充在位');
+  assert.match(legacy.sources.free.error, /还没跑过/);
 });
 
 check('api-19 GLOBAL_KEY / ROUTE_PREFIX 是双侧约定，值钉死', () => {

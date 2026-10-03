@@ -1,10 +1,13 @@
 import { check, runAll, assert, fixture } from './_helpers.mjs';
 import {
-  balancedObjectAt, unescapeChunks, parseRankingsHtml, fetchRankings, RANKINGS_URL, RANKINGS_SOURCE_NOTE,
+  balancedObjectAt, unescapeChunks, parseRankingsHtml, fetchRankings,
+  parseFreeRankingsJson, fetchFreeRankings,
+  RANKINGS_URL, RANKINGS_SOURCE_NOTE, FREE_RANKINGS_NOTE, FREE_RANKINGS_URL,
 } from '../lib/services/rankings.js';
 
 const weekHtml = await fixture('rankings-week.html');
 const emptyHtml = await fixture('rankings-empty.html');
+const freeJson = await fixture('free-week.json');
 
 /** 造一段最小 flight 文档：body 会被当成 JS 字符串字面量体（JSON.stringify 负责转义）。 */
 function flightDoc(...bodies) {
@@ -152,6 +155,82 @@ check('rank-18 fetchRankings 网络异常折成 reason 不上抛', async () => {
 check('rank-19 常驻标注文案在宿主侧单点定义（一份真相）', () => {
   assert.match(RANKINGS_SOURCE_NOTE, /非官方/);
   assert.match(RANKINGS_SOURCE_NOTE, /改版/);
+});
+
+check('rank-20 SSR 解析不再产出免费榜：free 行被剔除且响应里没有 freeRows 字段（v1.8 独立源）', () => {
+  const r = parseRankingsHtml(flightDoc(dehydratedObj(['rankings', 'models', { view: 'week' }], [
+    { model_permaslug: 'p/m', variant: 'standard', total_prompt_tokens: 1, total_completion_tokens: 1 },
+    { model_permaslug: 'p/f', variant: 'free', variant_permaslug: 'p/f:free', total_prompt_tokens: 100, total_completion_tokens: 23 },
+  ])));
+  assert.equal(r.ok, true);
+  assert.equal(r.rows.length, 1, 'free 行不许占周榜名次');
+  assert.equal('freeRows' in r, false, 'SSR 侧免费榜通道已拆：不许再带 freeRows');
+});
+
+check('rank-21 免费榜解析：筛 free、按 rankingMetricValue 降序、slug 带 :free、截到 20', () => {
+  const rows = [];
+  for (let i = 0; i < 25; i++) {
+    rows.push({ date: '2026-10-02 00:00:00', model_permaslug: `p/m${i}`, variant: 'free', variant_permaslug: `p/m${i}:free`, rankingMetricValue: 1000 - i });
+  }
+  rows.push({ date: '2026-10-02 00:00:00', model_permaslug: 'p/std', variant: 'standard', rankingMetricValue: 99999 });
+  const r = parseFreeRankingsJson(JSON.stringify({ data: rows }));
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.rows.length, 20, '超 20 截到 TOP_N_MAX');
+  assert.equal(r.rows[0].slug, 'p/m0:free');
+  for (let i = 1; i < r.rows.length; i++) assert.ok(r.rows[i - 1].tokens >= r.rows[i].tokens, '必须降序');
+  assert.ok(!r.rows.some((x) => x.slug === 'p/std'), 'standard 行不进免费榜');
+});
+
+check('rank-22 免费榜解析：同 slug 多行取 date 最新；metric 缺失回落 prompt+completion', () => {
+  const r = parseFreeRankingsJson(JSON.stringify({ data: [
+    { date: '2026-09-28 00:00:00', variant_permaslug: 'p/a:free', variant: 'free', rankingMetricValue: 500 },
+    { date: '2026-10-02 00:00:00', variant_permaslug: 'p/a:free', variant: 'free', rankingMetricValue: 100 },
+    { date: '2026-10-02 00:00:00', variant: 'free', model_permaslug: 'p/b', total_prompt_tokens: 60, total_completion_tokens: 40 },
+    { date: '2026-10-02 00:00:00', variant: 'free', model_permaslug: 'p/c', rankingMetricValue: 120 },
+  ] }));
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.rows, [
+    { slug: 'p/a:free', tokens: 100 },
+    { slug: 'p/c', tokens: 120 },
+    { slug: 'p/b', tokens: 100 },
+  ].sort((a, b) => b.tokens - a.tokens), 'p/a 取最新日 100 而不是旧日 500；p/b 走回落口径');
+});
+
+check('rank-23 免费榜坏响应口径：非 JSON / data 非数组 / 无任何行才判坏', () => {
+  assert.match(parseFreeRankingsJson('not json').reason, /JSON/);
+  assert.match(parseFreeRankingsJson(JSON.stringify({ data: {} })).reason, /data 不是数组/);
+  assert.match(parseFreeRankingsJson(JSON.stringify({ data: [{ variant: 'weird' }, null] })).reason, /没有可用行/);
+  const onlyStd = parseFreeRankingsJson(JSON.stringify({ data: [{ variant: 'standard', model_permaslug: 'p/m' }] }));
+  assert.equal(onlyStd.ok, true, '有 standard 行说明结构没坏：免费榜为空是数据本如此');
+  assert.deepEqual(onlyStd.rows, []);
+});
+
+check('rank-24 真页夹具：免费榜成榜 ≥15 行、slug 带 :free、降序（独立源数据量够）', () => {
+  const r = parseFreeRankingsJson(freeJson);
+  assert.equal(r.ok, true, r.reason);
+  assert.ok(r.rows.length >= 15, `真页免费模型应有足够行数，实得 ${r.rows.length}`);
+  for (const row of r.rows) assert.match(row.slug, /:free$/, `免费行 slug 应带 :free 后缀：${row.slug}`);
+  for (let i = 1; i < r.rows.length; i++) assert.ok(r.rows[i - 1].tokens >= r.rows[i].tokens);
+});
+
+check('rank-25 fetchFreeRankings 命中独立端点且带 UA；非 2xx / 网络异常折成人话', async () => {
+  let captured;
+  const fake = async (url, opts) => { captured = { url, opts }; return { ok: true, status: 200, text: async () => freeJson }; };
+  const r = await fetchFreeRankings({ fetchFn: fake });
+  assert.equal(r.ok, true);
+  assert.equal(captured.url, FREE_RANKINGS_URL);
+  assert.ok(captured.opts.headers['User-Agent']);
+  const r403 = await fetchFreeRankings({ fetchFn: async () => ({ ok: false, status: 403, text: async () => '' }) });
+  assert.match(r403.reason, /403/);
+  const rNet = await fetchFreeRankings({ fetchFn: async () => { throw new Error('socket hang up'); } });
+  assert.equal(rNet.ok, false);
+  assert.match(rNet.reason, /socket hang up/);
+});
+
+check('rank-26 免费榜来源文案在宿主单点定义且与新端点口径一致（一份真相）', () => {
+  assert.match(FREE_RANKINGS_NOTE, /非官方/);
+  assert.match(FREE_RANKINGS_NOTE, /失效/);
+  assert.match(FREE_RANKINGS_NOTE, /周 token/);
 });
 
 await runAll('rankings');
